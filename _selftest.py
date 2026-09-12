@@ -6,7 +6,7 @@
 """
 import os
 import queue
-import subprocess
+import runpy
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +24,9 @@ def _has_mock():
 
 
 if not _has_mock():
-    subprocess.run([sys.executable, os.path.join(HERE, "_make_mock.py")], check=True)
+    # 用 runpy 在当前进程内执行：某些受监管环境会杀掉子进程，
+    # 那样 subprocess 会静默失效（返回 0 却没生成任何文件）
+    runpy.run_path(os.path.join(HERE, "_make_mock.py"), run_name="__main__")
 
 
 def run_search(files, keywords, use_regex=False, match_all=False, only_error=False):
