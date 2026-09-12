@@ -235,8 +235,13 @@ class ReleaseTool:
         self.cfg = load_tool_config()
 
         root.title(APP_TITLE)
-        root.geometry("960x700")
-        root.minsize(840, 580)
+        # 自适应屏幕尺寸：768 高度以下的屏幕（如 1920x1080 @150%）逻辑高度
+        # 只有 720，窗口过高会把底部状态栏顶到任务栏下面
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w = min(1120, max(900, sw - 60))
+        h = min(700, max(560, sh - 90))
+        root.geometry("{}x{}".format(w, h))
+        root.minsize(min(1000, w), min(600, h))
         root.configure(bg=BG)
 
         self._setup_style()
@@ -263,8 +268,8 @@ class ReleaseTool:
         st.configure("TFrame", background=BG)
         st.configure("TLabel", background=BG, foreground=TEXT, font=FG)
         st.configure("TRadiobutton", background=CARD, foreground=TEXT, font=FG)
-        st.configure("TButton", font=FG, padding=(12, 6))
-        st.configure("Accent.TButton", font=FG_B, padding=(18, 8),
+        st.configure("TButton", font=FG, padding=(10, 5))
+        st.configure("Accent.TButton", font=FG_B, padding=(14, 6),
                      background=ACCENT, foreground="#ffffff", borderwidth=0)
         st.map("Accent.TButton",
                background=[("active", ACCENT_D), ("disabled", "#a9c0f2")],
@@ -346,7 +351,7 @@ class ReleaseTool:
         for text, cb in (("检查版本", self.on_check), ("打包", self.on_build),
                          ("发布", self.on_publish), ("发布后自检", self.on_verify)):
             b = ttk.Button(btns, text=text, command=cb)
-            b.pack(side="left", padx=(10, 0))
+            b.pack(side="left", padx=(8, 0))
             self.btn_steps.append(b)
         self.btn_stop = ttk.Button(btns, text="停止", command=self.on_stop,
                                    state="disabled")
