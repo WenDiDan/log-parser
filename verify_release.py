@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
-"""发布后自检：回读线上升级清单，确认版本号正确、exe 可下载。
+"""发布后自检：回读升级清单，确认版本号正确、exe 可用。
+
+支持两类源：
+    - Web 源（http/https）     ：Gitee、GitHub
+    - 本地源（盘符 / UNC 共享）：离线升级目录（见 离线升级说明.md）
 
 用法:
     python verify_release.py                    # 校验内置的 Gitee + GitHub 两个源
     python verify_release.py --gitee            # 仅 Gitee
     python verify_release.py --github           # 仅 GitHub
-    python verify_release.py --manifest URL     # 校验指定的 version.json（可多次）
+    python verify_release.py --manifest URL     # 校验指定清单（Web 地址或本地路径，可多次）
     python verify_release.py --expect 1.0.12    # 指定期望版本（默认取源码 APP_VERSION）
     python verify_release.py --retries 3 --delay 5 --timeout 25
 
 校验内容:
-    1. 清单可下载且是合法 JSON
+    1. 清单可读取且是合法 JSON
     2. 清单 version 与期望版本一致
-    3. 清单 url 解析出的 exe 可访问（HEAD，退化用 Range GET），并给出大小
+    3. 清单 url 解析出的 exe 可用（Web 用 HEAD，退化 Range GET；本地直接看文件）
 
 退出码:
     0  全部通过
-    1  存在内容问题（404 / 版本不符 / 清单格式错误）
+    1  存在内容问题（404 / 版本不符 / 文件缺失）
     2  仅网络问题（连接超时、主机无响应），无法判定
 
 区分 1 和 2 是为了让发布脚本能判断「发布真的有问题」还是
@@ -58,6 +62,12 @@ def read_source_version():
     return m.group(1).strip() if m else ""
 
 
+def is_local_path(u):
+    """不是 http(s) 就按本地路径处理（盘符 / UNC / 相对路径）。"""
+    u = (u or "").strip()
+    return bool(u) and not u.lower().startswith(("http://", "https://"))
+
+
 def http(url, method="GET", headers=None, timeout=25):
     req = urllib.request.Request(url, method=method)
     req.add_header("User-Agent", UA)
@@ -66,8 +76,49 @@ def http(url, method="GET", headers=None, timeout=25):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def probe_size(url, timeout):
-    """尽力获取远端文件大小。返回 (code, size, net_error)。"""
+def is_abs_local(u):
+    """绝对本地路径：盘符（D:\\...）或 UNC 共享（\\\\server\\...）。"""
+    u = (u or "").strip()
+    return u.startswith("\\\\") or (len(u) > 2 and u[1:3] == ":\\")
+
+
+def resolve_exe_url(manifest_url, rel):
+    """把清单里的 url 解析成真实地址（规则与 LogParser.py 保持一致）。
+
+    注意：相对 url（如 "LogParser.exe"）必须基于**清单所在目录**拼接，
+    不能因为"不是 http"就当成本地绝对路径直接用。
+    """
+    if not rel:
+        return manifest_url
+    if rel.lower().startswith(("http://", "https://")):
+        return rel
+    if is_abs_local(rel):
+        return rel
+    if is_local_path(manifest_url):
+        return os.path.join(os.path.dirname(manifest_url), rel)
+    base = manifest_url.rsplit("/", 1)[0]
+    return base.rstrip("/") + "/" + rel.lstrip("/")
+
+
+def fetch_manifest_text(url, timeout):
+    """返回 (text, err_msg, net_error)。"""
+    if is_local_path(url):
+        try:
+            with io.open(url, "r", encoding="utf-8") as f:
+                return (f.read(), "", False)
+        except Exception as exc:
+            return (None, "清单读取失败: {}".format(exc), False)
+    try:
+        with http(url, timeout=timeout) as r:
+            return (r.read().decode("utf-8", "ignore"), "", False)
+    except urllib.error.HTTPError as e:
+        return (None, "清单 HTTP {}".format(e.code), False)
+    except Exception as e:
+        return (None, "清单获取失败: {}".format(e), True)
+
+
+def probe_web_size(url, timeout):
+    """Web 文件的 (code, size, net_error)。"""
     try:
         with http(url, method="HEAD", timeout=timeout) as r:
             code = r.getcode()
@@ -96,50 +147,59 @@ def probe_size(url, timeout):
         return (None, None, True)
 
 
+def probe_exe(url, timeout):
+    """返回 (size, err_msg, net_error)。"""
+    if is_local_path(url):
+        if os.path.isfile(url):
+            return (os.path.getsize(url), "", False)
+        return (None, "exe 不存在: {}".format(url), False)
+    code, size, net_err = probe_web_size(url, timeout)
+    if code in (200, 206):
+        return (size, "", False)
+    if code == 404:
+        return (None, "exe 不可下载 (HTTP 404)：该 Release 很可能未上传 exe 附件", False)
+    if code is None:
+        return (None, "exe 连接失败（网络无响应）", True)
+    return (None, "exe 不可下载 (HTTP {})".format(code), False)
+
+
 def check_one(label, manifest_url, expect, retries, delay, timeout):
     """返回 'ok' / 'bad'（内容问题）/ 'net'（网络问题）。"""
     print("[..] {}  {}".format(label, manifest_url))
+    local = is_local_path(manifest_url)
+    attempts = 1 if local else retries      # 本地文件不必重试
+    kind = "bad"
     last = "未知错误"
-    net_only = False
-    for attempt in range(1, retries + 1):
-        try:
-            with http(manifest_url, timeout=timeout) as r:
-                raw = r.read().decode("utf-8", "ignore")
-            data = json.loads(raw)
-        except urllib.error.HTTPError as e:
-            last = "清单 HTTP {}".format(e.code)
-            net_only = False
-        except Exception as e:
-            last = "清单获取失败: {}".format(e)
-            net_only = True
+    for attempt in range(1, attempts + 1):
+        text, err, net = fetch_manifest_text(manifest_url, timeout)
+        if text is None:
+            last, kind = err, ("net" if net else "bad")
         else:
-            ver = str(data.get("version", "")).strip()
-            url = str(data.get("url", "")).strip()
-            if expect and ver != expect:
-                last = "版本不符: 线上 {} / 期望 {}".format(ver or "<空>", expect)
-                net_only = False
-            elif not url:
-                last = "清单缺少 url 字段"
-                net_only = False
+            try:
+                data = json.loads(text)
+            except ValueError as exc:
+                last, kind = "清单 JSON 解析失败: {}".format(exc), "bad"
             else:
-                exe = urllib.parse.urljoin(manifest_url, url)
-                code, size, net_err = probe_size(exe, timeout)
-                if code in (200, 206):
-                    human = "  {:.1f} MB".format(size / 1048576.0) if size else ""
-                    print("[OK] {}  version={}{}".format(label, ver, human))
-                    return "ok"
-                if code == 404:
-                    last = "exe 不可下载 (HTTP 404)：该 Release 很可能未上传 exe 附件"
-                elif code is None:
-                    last = "exe 连接失败（网络无响应）"
+                ver = str(data.get("version", "")).strip()
+                url = str(data.get("url", "")).strip()
+                if expect and ver != expect:
+                    last, kind = ("版本不符: 线上 {} / 期望 {}".format(
+                        ver or "<空>", expect), "bad")
+                elif not url:
+                    last, kind = "清单缺少 url 字段", "bad"
                 else:
-                    last = "exe 不可下载 (HTTP {})".format(code)
-                net_only = bool(net_err)
-        if attempt < retries:
-            print("     retry {}/{} after {}s ...".format(attempt, retries, delay))
+                    exe = resolve_exe_url(manifest_url, url)
+                    size, err2, net2 = probe_exe(exe, timeout)
+                    if size is not None:
+                        human = "  {:.1f} MB".format(size / 1048576.0) if size else ""
+                        print("[OK] {}  version={}{}".format(label, ver, human))
+                        return "ok"
+                    last, kind = err2, ("net" if net2 else "bad")
+        if attempt < attempts:
+            print("     retry {}/{} after {}s ...".format(attempt, attempts, delay))
             time.sleep(delay)
     print("[BAD] {}  {}".format(label, last))
-    return "net" if net_only else "bad"
+    return kind
 
 
 def main():
@@ -147,7 +207,7 @@ def main():
     ap.add_argument("--gitee", action="store_true", help="check the built-in Gitee source")
     ap.add_argument("--github", action="store_true", help="check the built-in GitHub source")
     ap.add_argument("--manifest", action="append", default=[],
-                    help="check a specific version.json URL")
+                    help="check a specific version.json (URL or local path)")
     ap.add_argument("--expect", default="",
                     help="expected version (default: APP_VERSION in LogParser.py)")
     ap.add_argument("--retries", type=int, default=3, help="attempts per source (default 3)")
@@ -158,7 +218,7 @@ def main():
     expect = args.expect.strip() or read_source_version()
     targets = []
     for m in args.manifest:
-        targets.append(("Custom", m))
+        targets.append(("本地  " if is_local_path(m) else "Custom", m))
     if args.gitee:
         targets.append(("Gitee ", BUILTIN["Gitee "]))
     if args.github:
@@ -174,12 +234,12 @@ def main():
     print("=" * 58)
 
     if all(r == "ok" for r in results):
-        print("自检通过：线上清单与 exe 均可访问。")
+        print("自检通过：清单与 exe 均可访问。")
         return 0
     if any(r == "bad" for r in results):
-        print("自检未通过：线上内容有问题，请查看上方 [BAD] 行。")
+        print("自检未通过：存在内容问题，请查看上方 [BAD] 行。")
         return 1
-    print("自检未完成：网络原因无法访问线上源（发布本身可能已成功），稍后重跑即可。")
+    print("自检未完成：网络原因无法访问（发布本身可能已成功），稍后重跑即可。")
     return 2
 
 

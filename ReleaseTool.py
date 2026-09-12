@@ -5,12 +5,13 @@
 verify_release.py 融合到一个窗口：
 
     1 检查版本一致性    2 打包（PyInstaller）
-    3 发布（Gitee / GitHub）   4 发布后自检
+    3 发布（Gitee / GitHub / 本地目录）   4 发布后自检
 
 也可以直接点「一键全流程」按顺序跑完四步。
 
 所有子任务都在后台线程执行，输出经 queue 回到主线程实时显示，界面不卡。
 """
+import json
 import os
 import queue
 import re
@@ -19,14 +20,17 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, filedialog, messagebox
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
+    _reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".logparser", "release_tool.json")
 APP_TITLE = "设备日志解析器 · 打包发布工具"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -56,7 +60,7 @@ BUILD_ARGS = [
     "--version-file=version.txt",
     "--name=LogParser",
     "--noconfirm",
-    "--hidden-import=urllib.request",
+    "--hiddenurllib.request",
     "--hidden-import=PIL",
     "--hidden-import=PIL.ImageTk",
     "LogParser.py",
@@ -75,6 +79,26 @@ def read_app_version():
         return m.group(1) if m else "?"
     except Exception:
         return "?"
+
+
+def load_tool_config():
+    """读取发布工具自己的配置（发布目标、本地目录）。"""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_tool_config(data):
+    try:
+        d = os.path.dirname(CONFIG_FILE)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 def _probe_build_python(path):
@@ -208,6 +232,7 @@ class ReleaseTool:
         self.py_build = ""
         self.py_pub = sys.executable
         self.ver = read_app_version()
+        self.cfg = load_tool_config()
 
         root.title(APP_TITLE)
         root.geometry("960x700")
@@ -219,6 +244,9 @@ class ReleaseTool:
         self._build_controls()
         self._build_log()
         self._build_status()
+
+        self.var_target.set(self.cfg.get("target", "both"))
+        self.var_local.set(self.cfg.get("local_dir", ""))
 
         self._append("准备就绪，当前源码版本 v{}".format(self.ver))
         self.root.after(80, self._poll)
@@ -290,9 +318,24 @@ class ReleaseTool:
         tgt.pack(fill="x", pady=(16, 0))
         tk.Label(tgt, text="发布目标：", bg=CARD, fg=TEXT, font=FG).pack(side="left")
         self.var_target = tk.StringVar(value="both")
-        for val, txt in (("both", "全部"), ("gitee", "仅 Gitee"), ("github", "仅 GitHub")):
+        for val, txt in (("both", "全部"), ("gitee", "仅 Gitee"),
+                         ("github", "仅 GitHub"), ("local", "仅本地")):
             ttk.Radiobutton(tgt, text=txt, value=val,
                             variable=self.var_target).pack(side="left", padx=(0, 14))
+
+        # 本地 / 共享目录：离线升级包（清单 + exe 复制过去）
+        local_row = tk.Frame(inner, bg=CARD)
+        local_row.pack(fill="x", pady=(10, 0))
+        tk.Label(local_row, text="本地目录：", bg=CARD, fg=TEXT, font=FG).pack(side="left")
+        self.var_local = tk.StringVar(value="")
+        ttk.Entry(local_row, textvariable=self.var_local,
+                  font=FG).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(local_row, text="浏览…",
+                   command=self.on_pick_local).pack(side="left")
+        tk.Label(inner,
+                 text="离线升级用：LogParser.exe 与 version.json 会复制到该目录"
+                      "（支持 U 盘 / UNC 共享）",
+                 bg=CARD, fg=MUTED, font=FG_S).pack(anchor="w", pady=(4, 0))
 
         btns = tk.Frame(inner, bg=CARD)
         btns.pack(fill="x", pady=(16, 0))
@@ -491,8 +534,16 @@ class ReleaseTool:
         return (1, "打包（PyInstaller）", do)
 
     def _targets(self):
-        return {"gitee": ["gitee"], "github": ["github"],
-                "both": ["gitee", "github"]}[self.var_target.get()]
+        """本次要发布的渠道；「全部」= Gitee + GitHub + 本地目录。"""
+        t = self.var_target.get()
+        if t == "both":
+            return ["gitee", "github", "local"]
+        return [t]
+
+    def on_pick_local(self):
+        d = filedialog.askdirectory(title="选择本地/共享发布目录（离线升级包）")
+        if d:
+            self.var_local.set(os.path.normpath(d))
 
     def _step_publish(self):
         targets = self._targets()
@@ -504,6 +555,13 @@ class ReleaseTool:
             if "github" in targets:
                 if not w.run_cmd(self._py("publish_github.py", "--yes")):
                     return False
+            if "local" in targets:
+                d = self.var_local.get().strip()
+                if not d:
+                    w.log("!! 未填写本地目录，已跳过本地发布"
+                          "（可在「本地目录」里填写或点「浏览…」）")
+                elif not w.run_cmd(self._py("publish_local.py", "--dir", d, "--yes")):
+                    return False
             return True
         return (2, "发布", do)
 
@@ -511,25 +569,42 @@ class ReleaseTool:
         targets = self._targets()
 
         def do(w):
+            ran = 0
+            warned = False
             args = []
             if "gitee" in targets:
                 args.append("--gitee")
             if "github" in targets:
                 args.append("--github")
-            # verify_release.py 退出码：0 通过 / 1 内容问题 / 2 网络问题
-            if w.run_cmd(self._py("verify_release.py", "--timeout", "20") + args):
+            if args:
+                ran += 1
+                # verify_release.py 退出码：0 通过 / 1 内容问题 / 2 网络问题
+                if not w.run_cmd(self._py("verify_release.py",
+                                          "--timeout", "20") + args):
+                    if w.last_rc == 2:
+                        w.log("（网络原因未能完成线上自检；发布本身已成功，"
+                              "网络恢复后单独点「发布后自检」重跑即可）")
+                        warned = True
+                    else:
+                        return False
+            local_dir = self.var_local.get().strip()
+            if "local" in targets and local_dir:
+                ran += 1
+                if not w.run_cmd(self._py("verify_release.py", "--manifest",
+                                          os.path.join(local_dir, "version.json"))):
+                    return False
+            if not ran:
+                w.log("（没有配置发布目标，跳过自检）")
                 return True
-            if w.last_rc == 2:
-                w.log("（网络原因未能完成自检；发布本身已成功，"
-                      "网络恢复后单独点「发布后自检」重跑即可）")
-                return "warn"
-            return False
+            return "warn" if warned else True
         return (3, "发布后自检", do)
 
     # ---------- 事件 ----------
     def _start(self, steps, active=None):
         if self.busy:
             return
+        save_tool_config({"target": self.var_target.get(),
+                          "local_dir": self.var_local.get().strip()})
         self.busy = True
         self._set_buttons(False)
         skipped = [i for i in range(len(STEP_NAMES))
@@ -558,10 +633,16 @@ class ReleaseTool:
         self._start([self._step_build()], active={1})
 
     def on_publish(self):
-        names = "\u3001".join("Gitee" if x == "gitee" else "GitHub" for x in self._targets())
+        label = {"gitee": "Gitee", "github": "GitHub", "local": "本地目录"}
+        targets = self._targets()
+        names = "\u3001".join(label[x] for x in targets)
+        note = ""
+        if "local" in targets and not self.var_local.get().strip():
+            note = "\n（本地目录为空，本次会跳过本地发布）"
         if not messagebox.askyesno("确认发布",
-                                   "将把 v{} 发布到：{}\n\n确认开始？\n\n"
-                                   "（不会重新打包，直接使用现有产物）".format(self.ver, names)):
+                                   "将把 v{} 发布到：{}{}\n\n确认开始？\n\n"
+                                   "（不会重新打包，直接使用现有产物）".format(
+                                       self.ver, names, note)):
             return
         self._start([self._step_check(), self._step_publish(), self._step_verify()],
                     active={0, 2, 3})
