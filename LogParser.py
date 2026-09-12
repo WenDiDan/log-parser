@@ -1298,7 +1298,9 @@ class App:
                         tags = ["odd" if len(self.results) % 2 else "even"]
                         if is_err:
                             tags.append("err")
-                        self.tree_res.insert("", "end", values=(
+                        # 用 results 的下标作为 iid：排序只改变表格显示顺序，
+                        # 双击详情/右键菜单仍可用 iid 精确定位到原始行
+                        self.tree_res.insert("", "end", iid=str(len(self.results)), values=(
                             ts, mod, fname, text if len(text) <= 500 else text[:500] + "…"),
                             tags=tuple(tags))
                         self.results.append((ts, mod, fname, text, path, lineno))
@@ -1427,8 +1429,11 @@ class App:
         sel = self.tree_res.selection()
         if not sel:
             return
-        idx = self.tree_res.index(sel[0])
-        if idx >= len(self.results):
+        try:
+            idx = int(sel[0])
+        except (TypeError, ValueError):
+            return
+        if not (0 <= idx < len(self.results)):
             return
         ts, mod, fname, text, path, lineno = self.results[idx]
         win = tk.Toplevel(self.root)
@@ -1783,8 +1788,11 @@ class App:
         sel = self.tree_res.selection()
         if not sel:
             return
-        idx = self.tree_res.index(sel[0])
-        if idx >= len(self.results):
+        try:
+            idx = int(sel[0])
+        except (TypeError, ValueError):
+            return
+        if not (0 <= idx < len(self.results)):
             return
         ts, mod, fname, text, path, lineno = self.results[idx]
         menu = tk.Menu(self.root, tearoff=0)
@@ -1910,32 +1918,37 @@ class App:
                     APP_TITLE, "未配置可用的升级源。\n"
                     "请点击菜单「帮助 → 升级源设置…」填写 version.json 的地址。"))
             return
+        # 遍历所有源并取最高版本：某个源可达但清单偏旧时不能就此停手，
+        # 否则会漏掉后续源里的新版本（多仓容灾的关键）
+        lv = parse_ver(APP_VERSION)
         errors = []
+        best = None                     # (版本元组, 远端信息)
         for src in sources:
             try:
                 data = json.loads(fetch_text(src))
-                rv = parse_ver(str(data.get("version", "")))
-                lv = parse_ver(APP_VERSION)
-                if rv > lv:
-                    remote = {"version": str(data.get("version", "")),
-                              "url": data.get("url", ""),
-                              "notes": data.get("notes", ""),
-                              # 记住命中来源：exe 的相对地址要基于它解析
-                              "_src": src}
-                    self.root.after(0, lambda r=remote: self._on_update_available(r))
-                elif manual:
-                    self.root.after(0, lambda s=src: messagebox.showinfo(
-                        APP_TITLE, "当前已是最新版本（v{}）\n\n升级源：{}".format(APP_VERSION, s)))
-                return                      # 成功即返回，不再尝试后续源
             except Exception as e:
                 errors.append("{}  ->  {}".format(src, e))
                 continue
-        # 全部候选源都失败
-        if manual and errors:
-            detail = "\n".join(errors)
-            self.root.after(0, lambda d=detail: messagebox.showerror(
-                APP_TITLE,
-                "所有升级源均不可用（已尝试 {} 个）：\n\n{}".format(len(errors), d)))
+            rv = parse_ver(str(data.get("version", "")))
+            if best is None or rv > best[0]:
+                best = (rv, {"version": str(data.get("version", "")),
+                             "url": data.get("url", ""),
+                             "notes": data.get("notes", ""),
+                             # 记住命中来源：exe 的相对地址要基于它解析
+                             "_src": src})
+
+        if best is not None and best[0] > lv:
+            remote = best[1]
+            self.root.after(0, lambda r=remote: self._on_update_available(r))
+        elif manual:
+            if best is not None:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    APP_TITLE, "当前已是最新版本（v{}）".format(APP_VERSION)))
+            elif errors:
+                detail = "\n".join(errors)
+                self.root.after(0, lambda d=detail: messagebox.showerror(
+                    APP_TITLE,
+                    "所有升级源均不可用（已尝试 {} 个）：\n\n{}".format(len(errors), d)))
 
     def _on_update_available(self, remote):
         self._pending_update = remote

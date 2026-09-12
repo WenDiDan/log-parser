@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 
-base = r"E:\WorkBuddy\log-parser\_mock_logs\Ultrasonicwelding2"
+base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    "_mock_logs", "Ultrasonicwelding2")
 os.makedirs(base, exist_ok=True)
 
 samples = {

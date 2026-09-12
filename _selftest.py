@@ -1,69 +1,85 @@
 # -*- coding: utf-8 -*-
-"""LogParser 自测：对样例日志做索引/解析/搜索/统计测试"""
-import sys, queue, time
-sys.path.insert(0, r"E:\WorkBuddy\log-parser")
-from LogParser import iter_log_files, parse_line, is_error_line, SearchWorker, StatsWorker, App
+"""LogParser 自测：对样例日志做索引/解析/搜索/统计测试。
 
-BASE = r"E:\WorkBuddy\log-parser\_mock_logs\Ultrasonicwelding2"
+用法：在项目根目录运行  python _selftest.py
+样例日志不存在时会自动调用 _make_mock.py 生成，因此换台机器 clone 下来也能直接跑。
+"""
+import os
+import queue
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from LogParser import (iter_log_files, parse_line, is_error_line,
+                       SearchWorker, StatsWorker, App)
+
+BASE = os.path.join(HERE, "_mock_logs", "Ultrasonicwelding2")
+NO_LIMIT = 10_000_000
+
+
+def _has_mock():
+    return any(f.endswith(".txt") for _, _, fs in os.walk(BASE) for f in fs)
+
+
+if not _has_mock():
+    subprocess.run([sys.executable, os.path.join(HERE, "_make_mock.py")], check=True)
+
+
+def run_search(files, keywords, use_regex=False, match_all=False, only_error=False):
+    """跑一次 SearchWorker 并收集全部结果行。"""
+    out_q, prog_q = queue.Queue(), queue.Queue()
+    w = SearchWorker(files, keywords, use_regex, match_all, only_error,
+                     None, None, NO_LIMIT, out_q, prog_q)
+    w.start()
+    w.join()
+    rows = []
+    while True:
+        item = out_q.get_nowait()
+        if item is None:
+            break
+        rows += item
+    return rows
+
 
 files = iter_log_files(BASE)
 print("files:", len(files))
-modules = {f["module"] for f in files}
-print("modules:", sorted(modules))
+print("modules:", sorted({f["module"] for f in files}))
 assert len(files) >= 5, "文件数异常"
 
 ts, text = parse_line("[2026-07-20 11:12:55]在地址ns=4;s=X写入2")
 assert ts == "2026-07-20 11:12:55" and "写入2" in text
-assert is_error_line('"ResultFlag":false') and is_error_line("上料失败:库存不足") and not is_error_line("请求成功")
+assert is_error_line('"ResultFlag":false')
+assert is_error_line("上料失败:库存不足")
+assert not is_error_line("请求成功")
 
 # 搜索：全模块，仅异常
-out_q, prog_q = queue.Queue(), queue.Queue()
-w = SearchWorker(files, [], False, False, True, None, None, out_q, prog_q)
-w.start(); w.join()
-rows = []
-while True:
-    item = out_q.get_nowait()
-    if item is None:
-        break
-    rows += item
+rows = run_search(files, [], only_error=True)
 print("仅异常搜索: {} 条".format(len(rows)))
 assert rows, "应有异常行"
 assert all(is_error_line(r[3]) for r in rows)
 
 # 关键字 AND 搜索
-out_q2, _ = queue.Queue(), queue.Queue()
-w2 = SearchWorker(files, ["SerialNo", "ResultFlag\":false"], False, True, False, None, None, out_q2, queue.Queue())
-w2.start(); w2.join()
-rows2 = []
-while True:
-    item = out_q2.get_nowait()
-    if item is None:
-        break
-    rows2 += item
+rows2 = run_search(files, ["SerialNo", 'ResultFlag":false'], match_all=True)
 print("AND 关键字搜索: {} 条".format(len(rows2)))
 
 # 正则搜索
-out_q3, _ = queue.Queue(), queue.Queue()
-w3 = SearchWorker(files, r"条码【C33F2W[AB]JI\d+】品种：[AB]", True, False, False, None, None, out_q3, queue.Queue())
-w3.start(); w3.join()
-rows3 = []
-while True:
-    item = out_q3.get_nowait()
-    if item is None:
-        break
-    rows3 += item
+rows3 = run_search(files, r"条码【C33F2W[AB]JI\d+】品种：[AB]", use_regex=True)
 print("正则搜索: {} 条".format(len(rows3)))
 assert len(rows3) == 3
 
-# 统计
+# 统计（StatsWorker 通过 out_q 回传一个 dict）
 sq = queue.Queue()
 StatsWorker(files, sq).start()
-total, mod_count, hour_count, err_count = sq.get(timeout=120)
-print("统计: 总行数 {}  异常模块 {}".format(total, sum(err_count.values())))
-assert total >= 10
+stats = sq.get(timeout=120)
+print("统计: 总行数 {}  异常模块 {}".format(stats["total"],
+                                       sum(stats["err_count"].values())))
+assert stats["total"] >= 10
 
 # App 静态检查
-for m in ("open_dir", "load_dir", "start_search", "show_stats", "export", "_collect_selected"):
+for m in ("open_dir", "load_dir", "start_search", "show_stats", "export",
+          "_collect_selected"):
     assert hasattr(App, m), "App 缺少 " + m
 
 print("\nALL TESTS PASSED")
