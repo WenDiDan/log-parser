@@ -1,0 +1,5 @@
+{
+  "version": "1.1.0",
+  "url": "LogParser.exe",
+  "notes": "示例更新清单：把本文件改名为 version.json 放到服务器/共享目录，并把 LogParser.exe（新版本）放在同目录；再将 LogParser.py 顶部的 UPDATE_MANIFEST 改为该 version.json 的地址即可。\nurl 支持相对路径（基于本文件所在目录）或绝对地址（http(s)/UNC/盘符）。"
+}

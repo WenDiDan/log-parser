@@ -1,0 +1,40 @@
+# ============================================================
+# LogParser 版本控制忽略规则
+# ============================================================
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# ---- PyInstaller 构建产物 ----
+build/
+dist/
+*.manifest
+
+# ---- 发布产物：exe 体积大不入库（清单 version.json 与指南要入库）----
+github-release/*.exe
+gitee-release/**/*.exe
+*.zip
+
+# ---- 敏感信息：私人令牌绝不入库 ----
+gitee_token.txt
+gitee_token*
+*.token
+
+# ---- 运行期/测试生成 ----
+_mock_logs/
+*.log
+
+# ---- Windows 保留名产生的垃圾文件（防御性声明）----
+nul
+con
+aux
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
