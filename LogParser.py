@@ -93,10 +93,14 @@ APP_VERSION = "1.0.12"           # 当前版本号（与 version.txt / version.j
 # 客户端升到更新版本后再去问它就再也看不到新版本，升级链会断。
 UPDATE_MANIFEST = "https://github.com/WenDiDan/log-parser/releases/latest/download/version.json"
 
-# 已废弃的旧升级源（共享服务器已不可达 / 早期固定 Tag 写法）。客户端配置里若仍是这些地址，
+# 已废弃的旧升级源（早期固定 Tag 写法）。客户端配置里若仍是这些地址，
 # 启动时会自动迁移到上面的新默认源，无需逐台手工改配置。
+#
+# 注意：\\192.168.250.24\软件\LogParser\version.json 已重新启用为**离线升级源**
+# （见 离线升级说明.md；发布工具的「本地发布」就是往这个目录发），
+# 因此不能再列在这里 —— 否则用户在「升级源设置」里配好的本地源，
+# 会在下次启动时被当成废弃地址剔除掉（表现为"配置的地址源会丢失"）。
 LEGACY_MANIFESTS = {
-    r"\\192.168.250.24\软件\LogParser\version.json",
     "https://github.com/WenDiDan/log-parser/releases/download/v1.0.6/version.json",
 }
 
