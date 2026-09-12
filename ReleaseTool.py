@@ -253,6 +253,9 @@ class ReleaseTool:
         self.var_target.set(self.cfg.get("target", "both"))
         self.var_local.set(self.cfg.get("local_dir", ""))
 
+        # 关窗时再存一次，避免填了地址却没点过任何按钮
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
         self._append("准备就绪，当前源码版本 v{}".format(self.ver))
         self.root.after(80, self._poll)
         self._detect_python_async()
@@ -325,16 +328,19 @@ class ReleaseTool:
         self.var_target = tk.StringVar(value="both")
         for val, txt in (("both", "全部"), ("gitee", "仅 Gitee"),
                          ("github", "仅 GitHub"), ("local", "仅本地")):
-            ttk.Radiobutton(tgt, text=txt, value=val,
-                            variable=self.var_target).pack(side="left", padx=(0, 14))
+            ttk.Radiobutton(tgt, text=txt, value=val, variable=self.var_target,
+                            command=self.save_cfg).pack(side="left", padx=(0, 14))
 
         # 本地 / 共享目录：离线升级包（清单 + exe 复制过去）
         local_row = tk.Frame(inner, bg=CARD)
         local_row.pack(fill="x", pady=(10, 0))
         tk.Label(local_row, text="本地目录：", bg=CARD, fg=TEXT, font=FG).pack(side="left")
         self.var_local = tk.StringVar(value="")
-        ttk.Entry(local_row, textvariable=self.var_local,
-                  font=FG).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.ent_local = ttk.Entry(local_row, textvariable=self.var_local, font=FG)
+        self.ent_local.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        # 填完即记住：移出输入框或按回车都立即保存，不必等点按钮
+        self.ent_local.bind("<FocusOut>", lambda _e: self.save_cfg())
+        self.ent_local.bind("<Return>", lambda _e: self.save_cfg())
         ttk.Button(local_row, text="浏览…",
                    command=self.on_pick_local).pack(side="left")
         tk.Label(inner,
@@ -545,10 +551,16 @@ class ReleaseTool:
             return ["gitee", "github", "local"]
         return [t]
 
+    def save_cfg(self):
+        """把当前选择（发布目标 / 本地目录）写入配置文件，下次打开自动带出。"""
+        save_tool_config({"target": self.var_target.get(),
+                          "local_dir": self.var_local.get().strip()})
+
     def on_pick_local(self):
         d = filedialog.askdirectory(title="选择本地/共享发布目录（离线升级包）")
         if d:
             self.var_local.set(os.path.normpath(d))
+            self.save_cfg()
 
     def _step_publish(self):
         targets = self._targets()
@@ -608,8 +620,7 @@ class ReleaseTool:
     def _start(self, steps, active=None):
         if self.busy:
             return
-        save_tool_config({"target": self.var_target.get(),
-                          "local_dir": self.var_local.get().strip()})
+        self.save_cfg()
         self.busy = True
         self._set_buttons(False)
         skipped = [i for i in range(len(STEP_NAMES))
@@ -661,6 +672,10 @@ class ReleaseTool:
             self.btn_stop.configure(state="disabled")
             self.worker.cancel.set()
             self.worker.kill()
+
+    def on_close(self):
+        self.save_cfg()
+        self.root.destroy()
 
 
 def enable_hi_dpi():
