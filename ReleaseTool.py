@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 except Exception:
     pass
 
@@ -571,12 +571,58 @@ class ReleaseTool:
             self.worker.kill()
 
 
-def main():
-    root = tk.Tk()
+def enable_hi_dpi():
+    """声明进程 DPI 感知。必须在本进程创建任何窗口之前调用，
+    否则 Windows 会把窗口位图拉伸到系统缩放比例，文字和控件都会发虚。"""
     try:
-        root.iconbitmap(os.path.join(HERE, "app.ico"))
+        import ctypes
+    except Exception:
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # Win 8.1+
+        return
     except Exception:
         pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()        # 旧版
+    except Exception:
+        pass
+
+
+def set_window_icon(win):
+    """设置窗口图标。高 DPI 下 iconbitmap 只取 ico 里的小尺寸帧再放大，
+    图标会发虚；这里优先用 iconphoto 喂高分辨率图，失败再回落。"""
+    path = os.path.join(HERE, "app.ico")
+    if not os.path.isfile(path):
+        return
+    try:
+        from PIL import Image, ImageTk
+        im = Image.open(path)
+        best = None
+        for i in range(getattr(im, "n_frames", 1)):
+            try:
+                im.seek(i)
+            except Exception:
+                break
+            if best is None or im.size[0] > best.size[0]:
+                best = im.copy().convert("RGBA")
+        if best is not None and best.size[0] >= 64:
+            photo = ImageTk.PhotoImage(best)
+            win.iconphoto(True, photo)
+            win._icon_photo = photo          # 保持引用，否则被 GC 回收后图标消失
+            return
+    except Exception:
+        pass
+    try:
+        win.iconbitmap(path)
+    except Exception:
+        pass
+
+
+def main():
+    enable_hi_dpi()                          # 必须在 tk.Tk() 之前
+    root = tk.Tk()
+    set_window_icon(root)
     ReleaseTool(root)
     root.mainloop()
 
