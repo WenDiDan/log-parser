@@ -12,8 +12,8 @@
     python check_version.py          # 仅校验；全部一致退出码 0，否则 1
     python check_version.py --fix    # 自动把不一致处改写为源码版本
 
-发布脚本（发布.bat / 发布_Gitee.bat）会先调用本脚本，避免出现
-"清单版本与 exe 实际版本不符" 导致的升级链断裂。
+发布工具（ReleaseTool.py）与 publish_*.py 发布脚本都会用到本脚本，
+避免出现"清单版本与 exe 实际版本不符"导致的升级链断裂。
 """
 import io
 import json

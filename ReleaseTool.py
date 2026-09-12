@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """LogParser 打包 / 发布 可视化工具。
 
-把原本分散的 打包.bat、发布.bat、发布_Gitee.bat、check_version.py、
-verify_release.py 融合到一个窗口：
+把打包与发布的全流程（check_version.py、build_inproc.py、publish_gitee.py、
+publish_github.py、publish_local.py、verify_release.py）融合到一个窗口：
 
     1 检查版本一致性    2 打包（PyInstaller）
     3 发布（Gitee / GitHub / 本地目录）   4 发布后自检
@@ -101,6 +101,19 @@ def save_tool_config(data):
         pass
 
 
+def toc_has_tkinter(path):
+    """检查 PyInstaller 的 PYZ-00.toc 里是否真的打进了 tkinter。
+
+    返回 True / False；文件读不到时返回 None（无法判断，调用方应放行）。
+    缺 tkinter 的 exe 会启动即崩，而且往往要到现场才发现。
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return "tkinter" in f.read()
+    except Exception:
+        return None
+
+
 def _probe_build_python(path):
     if not path or not os.path.isfile(path):
         return False
@@ -114,7 +127,7 @@ def _probe_build_python(path):
 
 
 def find_build_python():
-    """找一个同时具备 tkinter + matplotlib + PyInstaller 的解释器（顺序同 打包.bat）。"""
+    """找一个同时具备 tkinter + matplotlib + PyInstaller 的解释器。"""
     cands = [
         os.path.join(HERE, ".venv", "Scripts", "python.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Python", "bin", "python.exe"),
@@ -521,7 +534,7 @@ class ReleaseTool:
                 return False
             # 优先走 build_inproc.py：它在进程内替换 PyInstaller 的隔离执行器，
             # 避免在受监管环境里 discover_hook_directories() 子进程被杀而报
-            # SubprocessDiedError（打包.bat 走的也是这条路径）。
+            # SubprocessDiedError。
             helper = os.path.join(HERE, "build_inproc.py")
             if os.path.isfile(helper):
                 cmd = [self.py_build, "-u", helper]
@@ -529,6 +542,20 @@ class ReleaseTool:
                 cmd = [self.py_build, "-u", "-m", "PyInstaller"] + BUILD_ARGS
             if not w.run_cmd(cmd):
                 return False
+
+            # 校验 tkinter 是否真的打进去了：缺了它的 exe 会启动即崩，
+            # 往往要到现场才被发现（原 打包.bat 里的这道检查）
+            toc = os.path.join(HERE, "build", "LogParser", "PYZ-00.toc")
+            has_tk = toc_has_tkinter(toc)
+            if has_tk is False:
+                w.log("!! 打包产物里没找到 tkinter —— 这样的 exe 启动会直接崩溃")
+                w.log("   请确认打包用的 Python 自带 tkinter，当前: " + self.py_build)
+                return False
+            if has_tk is None:
+                w.log("（未能读取 {} 校验 tkinter，已跳过该检查）".format(toc))
+            else:
+                w.log("tkinter 已打包 OK")
+
             src = os.path.join(HERE, "dist", "LogParser.exe")
             dst = os.path.join(HERE, "github-release", "LogParser.exe")
             if not os.path.isfile(src):

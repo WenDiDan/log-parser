@@ -44,7 +44,7 @@ _iso.Python = _InProcPython
 _parent.Python = _InProcPython
 _bm.isolated.Python = _InProcPython
 
-# Build with the exact same arguments as 打包.bat.
+# Build with the exact same arguments as the release tool's build step.
 argv = [
     "--onefile",
     "--windowed",

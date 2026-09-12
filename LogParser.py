@@ -2385,6 +2385,18 @@ class App:
                 messagebox.showwarning(APP_TITLE, "没有可用的升级源地址，已取消修改。\n"
                                                   "请至少填写一行合法地址。")
                 return
+            # 拦一下被截断的 UNC 路径（例如只剩 \\192）：它能通过 valid_manifest
+            # 的「以 \\ 开头」判断，但实际永远不可用，且会以合法源的身份一直
+            # 留在配置里（表现为「配置好的地址源悄悄失效」）
+            broken = [x for x in items
+                      if x.startswith("\\\\") and x.count("\\") < 4]
+            if broken:
+                if not messagebox.askyesno(
+                        APP_TITLE,
+                        "以下地址看起来不完整"
+                        "（UNC 路径至少要是 \\\\服务器\\共享\\文件名）：\n\n{}\n\n"
+                        "仍要保存吗？".format("\n".join(broken))):
+                    return
             self.update_manifests = items
             self.update_manifest = items[0]
             self._save_config()
