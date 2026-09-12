@@ -150,6 +150,17 @@ def main():
         ver = json.load(f)["version"]
     tag = "v" + ver
 
+    # 防止用旧 exe 发布新版本：校验 exe 的文件版本与清单版本一致
+    try:
+        from check_version import exe_matches_version, exe_file_version
+        if exe_matches_version(EXE, ver) is False:
+            print("[ERROR] 待发布的 exe 文件版本是 {}，与清单版本 {} 不一致。".format(
+                exe_file_version(EXE), ver))
+            print("        请先在「发布工具」里重新打包，避免用旧 exe 发布新版本。")
+            return 1
+    except ImportError:
+        pass
+
     print("============================================")
     print(" REPO: {}/{}".format(OWNER, REPO))
     print(" TAG : {}".format(tag))

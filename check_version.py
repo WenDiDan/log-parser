@@ -63,6 +63,48 @@ def nums_tuple(s):
     return tuple(int(x) for x in re.findall(r"\d+", s))
 
 
+def exe_file_version(path):
+    """读取 Windows exe 的 FileVersion 资源（如 '1.0.12.0'）。
+
+    纯 ctypes 实现，不依赖 pywin32。读不到时返回 ""，
+    调用方应把它当作「无法判断」而不是「不匹配」。
+    """
+    if os.name != "nt" or not os.path.isfile(path):
+        return ""
+    try:
+        import ctypes
+        path = os.path.abspath(path)          # 底层 API 对相对路径不可靠
+        ver = ctypes.windll.version
+        size = ver.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return ""
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(path, 0, size, buf):
+            return ""
+        ptr = ctypes.c_void_p()
+        length = ctypes.c_uint()
+        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(ptr),
+                                  ctypes.byref(length)):
+            return ""
+        if not ptr.value:
+            return ""
+        # VS_FIXEDFILEINFO 前 13 个 DWORD：索引 2/3 是 FileVersion 的 MS/LS
+        info = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint * 13)).contents
+        ms, ls = int(info[2]), int(info[3])
+        return "{}.{}.{}.{}".format(ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
+    except Exception:
+        return ""
+
+
+def exe_matches_version(exe_path, expect):
+    """exe 文件版本是否与 expect 一致。返回 True/False，读不到则 None（无法判断）。"""
+    raw = exe_file_version(exe_path)
+    if not raw:
+        return None
+    core = ".".join(str(int(x)) for x in nums_tuple(raw)[:3])
+    return core == ".".join(str(int(x)) for x in nums_tuple(expect)[:3])
+
+
 def txt_versions(text):
     """返回 version.txt 中 4 处版本号：filevers / prodvers / FileVersion / ProductVersion"""
     def grab(pat):
