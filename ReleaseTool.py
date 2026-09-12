@@ -22,7 +22,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
 except Exception:
     pass
 
@@ -447,9 +447,18 @@ class ReleaseTool:
                          "打包功能不可用（仍可执行检查 / 发布 / 自检）")
 
     # ---------- 步骤 ----------
+    def _py(self, script, *args):
+        """用 python -u 运行脚本。
+
+        -u 关闭 stdout 缓冲：子进程的 stdout 接到管道时默认是块缓冲，
+        像 publish_gitee.py 这种要跑几十秒的脚本，输出会一直积压到进程
+        结束才一次性刷出，界面上看起来就像卡死了。
+        """
+        return [self.py_pub, "-u", os.path.join(HERE, script)] + list(args)
+
     def _step_check(self):
         return (0, "检查版本一致性",
-                lambda w: w.run_cmd([self.py_pub, os.path.join(HERE, "check_version.py")]))
+                lambda w: w.run_cmd(self._py("check_version.py")))
 
     def _step_build(self):
         def do(w):
@@ -461,9 +470,9 @@ class ReleaseTool:
             # SubprocessDiedError（打包.bat 走的也是这条路径）。
             helper = os.path.join(HERE, "build_inproc.py")
             if os.path.isfile(helper):
-                cmd = [self.py_build, helper]
+                cmd = [self.py_build, "-u", helper]
             else:
-                cmd = [self.py_build, "-m", "PyInstaller"] + BUILD_ARGS
+                cmd = [self.py_build, "-u", "-m", "PyInstaller"] + BUILD_ARGS
             if not w.run_cmd(cmd):
                 return False
             src = os.path.join(HERE, "dist", "LogParser.exe")
@@ -490,12 +499,10 @@ class ReleaseTool:
 
         def do(w):
             if "gitee" in targets:
-                if not w.run_cmd([self.py_pub, os.path.join(HERE, "publish_gitee.py"),
-                                  "--yes"]):
+                if not w.run_cmd(self._py("publish_gitee.py", "--yes")):
                     return False
             if "github" in targets:
-                if not w.run_cmd([self.py_pub, os.path.join(HERE, "publish_github.py"),
-                                  "--yes"]):
+                if not w.run_cmd(self._py("publish_github.py", "--yes")):
                     return False
             return True
         return (2, "发布", do)
@@ -510,8 +517,7 @@ class ReleaseTool:
             if "github" in targets:
                 args.append("--github")
             # verify_release.py 退出码：0 通过 / 1 内容问题 / 2 网络问题
-            if w.run_cmd([self.py_pub, os.path.join(HERE, "verify_release.py"),
-                          "--timeout", "20"] + args):
+            if w.run_cmd(self._py("verify_release.py", "--timeout", "20") + args):
                 return True
             if w.last_rc == 2:
                 w.log("（网络原因未能完成自检；发布本身已成功，"
