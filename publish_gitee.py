@@ -9,7 +9,8 @@
 
 用法：
     set GITEE_TOKEN=你的Gitee私人令牌
-    python publish_gitee.py
+    python publish_gitee.py            # 交互确认后发布
+    python publish_gitee.py --yes      # 免确认（供发布工具 GUI 调用）
 
 也可以把令牌写进下列任一文件（均不会进入版本库）：
     %USERPROFILE%/.logparser/gitee_token.txt   （推荐）
@@ -154,14 +155,15 @@ def main():
     print(" TAG : {}".format(tag))
     print(" EXE : {}".format(EXE))
     print("============================================")
-    try:
-        raw = input("Publish? Enter=go, Ctrl+C=cancel: ")
-        if raw.strip().lower() == "n":
+    if "--yes" not in sys.argv[1:]:
+        try:
+            raw = input("Publish? Enter=go, Ctrl+C=cancel: ")
+            if raw.strip().lower() == "n":
+                print("cancelled")
+                return 0
+        except (EOFError, KeyboardInterrupt):
             print("cancelled")
             return 0
-    except (EOFError, KeyboardInterrupt):
-        print("cancelled")
-        return 0
 
     print("[1/4] remove old release if exists ...")
     try:
@@ -186,7 +188,11 @@ def main():
         raise RuntimeError("create release failed: " + json.dumps(rel, ensure_ascii=False)[:300])
     print("      release id = {}".format(rel_id))
 
-    print("[3/4] upload exe attachment (48MB, please wait) ...")
+    try:
+        size_mb = os.path.getsize(EXE) / 1048576.0
+    except Exception:
+        size_mb = 0.0
+    print("[3/4] upload exe attachment ({:.1f} MB, please wait) ...".format(size_mb))
     upload_attach(rel_id, token, EXE)
     print("      uploaded")
 
