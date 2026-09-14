@@ -3200,7 +3200,7 @@ class App:
         HEX、定时发送、常用指令一键发；记录带毫秒时间戳，方便跟设备日志
         对齐时间。窗口非模态，可以一边看日志一边收发。
         """
-        win = make_dialog(self.root, "TCP 调试工具", 960, 680,
+        win = make_dialog(self.root, "TCP 调试工具", 1000, 680,
                           resizable=True, modal=False)
         out_q = queue.Queue()
         # 运行时状态。装进 dict 是为了在闭包里改起来方便（不必给每个内部
@@ -3252,9 +3252,9 @@ class App:
         btn_conn = ttk.Button(row1, text="连接", style="Primary.TButton",
                               command=lambda: do_connect())
         btn_conn.pack(side="left")
-        lbl_conn = tk.Label(row1, text="未连接", bg=COLORS["card"],
-                            fg=COLORS["muted"], font=font_s)
-        lbl_conn.pack(side="left", padx=(12, 0))
+        # 连接状态原先跟在按钮后面，但这一行控件排得太满（模式 + 地址下拉 +
+        # 端口 + 宽的主色按钮），窗口稍窄或系统缩放偏大时它就被右边缘裁掉，
+        # 只剩半个字。改放到下面那行信息条上，那里空间宽裕。
 
         # ---- 收发记录 ----
         box = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
@@ -3281,6 +3281,10 @@ class App:
                               bg=COLORS["bg"], fg=COLORS["muted"],
                               font=font_s, anchor="w")
         lbl_counts.pack(side="left")
+        # 连接状态在这里：上面那行已经排满，放那儿会被右边缘裁掉
+        lbl_conn = tk.Label(info_row, text="未连接", bg=COLORS["bg"],
+                            fg=COLORS["muted"], font=font_s)
+        lbl_conn.pack(side="left", padx=(14, 0))
         # 数据一直来的话，想停下来看某一条就会被新内容顶走，给个开关
         var_follow = tk.BooleanVar(value=True)
         ttk.Checkbutton(info_row, text="自动滚动", variable=var_follow).pack(
@@ -3571,6 +3575,11 @@ class App:
             if var_server.get():
                 if cur in ("", "127.0.0.1", "localhost"):
                     var_host.set("0.0.0.0")
+                elif cur != "0.0.0.0" and cur not in local_ipv4_addresses():
+                    # 服务端只能绑定本机自己的地址，填别人的会直接 bind
+                    # 失败。提前说一声，省得对着「监听失败」发愣。
+                    append("sys", "提示：{} 不是本机地址，服务端要监听本机网卡"
+                                  "或 0.0.0.0".format(cur))
             elif cur in ("", "0.0.0.0"):
                 var_host.set("127.0.0.1")
             refresh_host_choices()
