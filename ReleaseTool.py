@@ -306,6 +306,7 @@ class Worker(threading.Thread):
         self.out_q = out_q
         self.cancel = threading.Event()
         self.proc = None
+        self.parallel = []          # 并发启动的子进程，取消时一并终止
         self.last_rc = None
 
     def log(self, s):
@@ -337,13 +338,64 @@ class Worker(threading.Thread):
         self.last_rc = rc
         return rc == 0
 
-    def kill(self):
-        p = self.proc
-        if p and p.poll() is None:
+    def run_cmds_parallel(self, jobs):
+        """并发执行多组命令，返回 {名字: 退出码}。
+
+        发布到多个渠道时用它：串行的话 Gitee 一旦连不上就会一直重试，
+        把 GitHub 和本地发布全堵在后面。并发之后各走各的，谁出问题
+        只影响谁。输出统一加 [名字] 前缀，免得几路日志混在一起看不清。
+        """
+        results = {}
+        lock = threading.Lock()
+
+        def one(name, cmd):
+            self.log("$ [{}] {}".format(name, " ".join(cmd)))
             try:
-                p.terminate()
-            except Exception:
-                pass
+                p = subprocess.Popen(
+                    cmd, cwd=HERE, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                    errors="replace", bufsize=1,
+                    creationflags=CREATE_NO_WINDOW)
+            except Exception as exc:
+                self.log("!! [{}] 无法启动命令: {}".format(name, exc))
+                with lock:
+                    results[name] = -1
+                return
+            with lock:
+                self.parallel.append(p)
+            out = p.stdout
+            if out is not None:
+                for line in out:
+                    line = line.rstrip("\r\n")
+                    if line:
+                        self.out_q.put(("log", "[{}] {}".format(name, line)))
+                    if self.cancel.is_set():
+                        try:
+                            p.terminate()
+                        except Exception:
+                            pass
+                        break
+            p.wait()
+            with lock:
+                results[name] = p.returncode
+
+        threads = [threading.Thread(target=one, args=(n, c), daemon=True)
+                   for n, c in jobs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        with lock:
+            self.parallel = [p for p in self.parallel if p.poll() is None]
+        return results
+
+    def kill(self):
+        for p in [self.proc] + list(self.parallel):
+            if p and p.poll() is None:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
 
     def run(self):
         total = len(self.steps)
@@ -1064,19 +1116,39 @@ class ReleaseTool:
         targets = self._targets()
 
         def do(w):
+            jobs = []          # (显示名, 命令)
             if "gitee" in targets:
-                if not w.run_cmd(self._py("publish_gitee.py", "--yes")):
-                    return False
+                jobs.append(("Gitee", self._py("publish_gitee.py", "--yes")))
             if "github" in targets:
-                if not w.run_cmd(self._py("publish_github.py", "--yes")):
-                    return False
+                jobs.append(("GitHub", self._py("publish_github.py", "--yes")))
             if "local" in targets:
                 d = self.var_local.get().strip()
                 if not d:
                     w.log("!! 未填写本地目录，已跳过本地发布"
                           "（可在「本地目录」里填写或点「浏览…」）")
-                elif not w.run_cmd(self._py("publish_local.py", "--dir", d, "--yes")):
-                    return False
+                else:
+                    jobs.append(("本地", self._py("publish_local.py",
+                                                 "--dir", d, "--yes")))
+            if not jobs:
+                w.log("（没有要发布的目标）")
+                return True
+            if len(jobs) == 1:
+                # 只有一个目标就不用开线程，日志也更干净
+                return True if w.run_cmd(jobs[0][1]) else False
+
+            w.log("并发发布：{}".format("、".join(n for n, _ in jobs)))
+            rcs = w.run_cmds_parallel(jobs)
+            failed = [n for n, rc in rcs.items() if rc != 0]
+            for n, _c in jobs:
+                rc = rcs.get(n, -1)
+                w.log("[{}] {}".format(
+                    n, "成功" if rc == 0 else "失败（退出码 {}）".format(rc)))
+            if failed:
+                # 一个渠道失败 ≠ 整次发布失败：别的渠道已经把包发上去了，
+                # 直接判失败会让人以为全都没成，白折腾一遍。
+                w.log("[WARN] 以下目标没成功：{} —— 其余目标已发布，"
+                      "处理好之后单独点「发布」重试即可".format("、".join(failed)))
+                return "warn"
             return True
         return (2, "发布", do)
 
@@ -1086,28 +1158,43 @@ class ReleaseTool:
         def do(w):
             ran = 0
             warned = False
-            args = []
+            jobs = []          # (显示名, 命令)
             if "gitee" in targets:
-                args.append("--gitee")
+                jobs.append(("Gitee", self._py(
+                    "verify_release.py", "--timeout", "20", "--gitee")))
             if "github" in targets:
-                args.append("--github")
-            if args:
+                jobs.append(("GitHub", self._py(
+                    "verify_release.py", "--timeout", "20", "--github")))
+            if jobs:
                 ran += 1
-                # verify_release.py 退出码：0 通过 / 1 内容问题 / 2 网络问题
-                if not w.run_cmd(self._py("verify_release.py",
-                                          "--timeout", "20") + args):
-                    if w.last_rc == 2:
-                        w.log("（网络原因未能完成线上自检；发布本身已成功，"
-                              "网络恢复后单独点「发布后自检」重跑即可）")
+                if len(jobs) == 1:
+                    # verify_release.py 退出码：0 通过 / 1 内容问题 / 2 网络问题
+                    if not w.run_cmd(jobs[0][1]):
                         warned = True
-                    else:
-                        return False
+                        if w.last_rc == 2:
+                            w.log("（网络原因未能完成线上自检；发布本身已成功，"
+                                  "网络恢复后单独点「发布后自检」重跑即可）")
+                        else:
+                            w.log("[WARN] 线上自检未通过 —— 内容可能没传对，"
+                                  "已发出去的东西不受影响")
+                else:
+                    # 两边分开查：一个站点卡住重试时，另一个不用跟着干等
+                    w.log("并发自检：{}".format("、".join(n for n, _ in jobs)))
+                    rcs = w.run_cmds_parallel(jobs)
+                    for n, _c in jobs:
+                        rc = rcs.get(n, -1)
+                        w.log("[{} 自检] {}".format(
+                            n, "通过" if rc == 0 else "未通过"))
+                        if rc != 0:
+                            warned = True
             local_dir = self.var_local.get().strip()
             if "local" in targets and local_dir:
                 ran += 1
                 if not w.run_cmd(self._py("verify_release.py", "--manifest",
                                           os.path.join(local_dir, "version.json"))):
-                    return False
+                    # 自检是最后一步，失败也不该把「发布成功」的结论推翻
+                    w.log("[WARN] 本地清单自检未通过")
+                    warned = True
             if not ran:
                 w.log("（没有配置发布目标，跳过自检）")
                 return True
