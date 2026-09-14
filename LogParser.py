@@ -1070,7 +1070,21 @@ class App:
         right_card = ttk.Frame(right_outer, style="Card.TFrame", padding=10)
         right_card.pack(fill="both", expand=True)
 
-        ttk.Label(right_card, text="📄  匹配结果", style="Head.TLabel").pack(anchor="w", pady=(0, 6))
+        head = ttk.Frame(right_card, style="Card.TFrame")
+        head.pack(fill="x", pady=(0, 6))
+        ttk.Label(head, text="📄  匹配结果", style="Head.TLabel").pack(side="left")
+        # 结果二次筛选：搜出几千条后可就地缩小范围；只隐藏不匹配的行，
+        # 原始结果与导出内容都不受影响
+        self.var_res_filter = tk.StringVar()
+        ttk.Entry(head, textvariable=self.var_res_filter, width=24).pack(side="right")
+        ttk.Button(head, text="清除", style="Ghost.TButton",
+                   command=lambda: self.var_res_filter.set("")).pack(
+            side="right", padx=(6, 4))
+        ttk.Label(head, text="🔎 在结果中筛选", style="Muted.TLabel").pack(
+            side="right", padx=(0, 6))
+        self.var_res_filter.trace_add("write",
+                                      lambda *a: self._filter_results())
+
         rf = ttk.Frame(right_card, style="Card.TFrame")
         rf.pack(fill="both", expand=True)
         rf.columnconfigure(0, weight=1)
@@ -1451,6 +1465,11 @@ class App:
         # 太多又会卡住界面。用「时间预算」而不是「每轮只吃一个 batch」兼顾两者。
         deadline = time.monotonic() + 0.05
         done = False
+        # 二次筛选条件：搜索途中新到的行也要遵守同一规则
+        try:
+            kw_filter = (self.var_res_filter.get() or "").strip().lower()
+        except Exception:
+            kw_filter = ""
         while time.monotonic() <= deadline:
             try:
                 item = self.out_q.get_nowait()
@@ -1474,6 +1493,10 @@ class App:
                     ts, mod, fname, text if len(text) <= 500 else text[:500] + "…"),
                     tags=tuple(tags))
                 self.results.append((ts, mod, fname, text, path, lineno))
+                # 已设二次筛选时，新到的行也要按同一规则决定显隐
+                if kw_filter and kw_filter not in " ".join(
+                        (ts, mod, fname, text)).lower():
+                    self.tree_res.detach(str(len(self.results) - 1))
 
         # 进度队列消息很轻，全部消费掉
         try:
@@ -1493,8 +1516,18 @@ class App:
 
         # 更新实时条数 / 空状态
         n = len(self.results)
-        self.var_rows.set("{} 条".format(n))
-        self._update_empty(n == 0)
+        # 设了二次筛选时显示「可见 / 总数」：这个标签不能被每轮的刷新覆盖掉
+        try:
+            kw_f = (self.var_res_filter.get() or "").strip()
+        except Exception:
+            kw_f = ""
+        if kw_f:
+            shown = len(self.tree_res.get_children(""))
+            self.var_rows.set("{} / {} 条".format(shown, n))
+            self._update_empty(shown == 0)
+        else:
+            self.var_rows.set("{} 条".format(n))
+            self._update_empty(n == 0)
 
         # 搜索仍在进行中则显示实时条数；已完成/取消则保持最终状态
         if not done and self.worker is not None and self.worker.is_alive():
@@ -1551,12 +1584,70 @@ class App:
         # 清空的同时停掉正在跑的搜索（否则 worker 还会继续往表格里塞结果）
         if getattr(self, "_searching", False):
             self._cancel_search()
-        self.tree_res.delete(*self.tree_res.get_children(""))
+        # 被筛选隐藏的行不在 get_children() 里，必须按 iid 逐个删，否则会残留
+        for idx in range(len(self.results)):
+            iid = str(idx)
+            try:
+                if self.tree_res.exists(iid):
+                    self.tree_res.delete(iid)
+            except Exception:
+                pass
         self.results = []
+        self._hidden_iids = set()
         self.var_rows.set("0 条")
         self._update_empty(True)
         if not silent:
             self.var_status.set("已清空")
+
+    def _filter_results(self):
+        """结果二次筛选：只隐藏不匹配的行，self.results 一条都不动。
+
+        这样导出、排序、双击详情、右键复制都仍然按原始数据工作，
+        用户看到的「筛选」纯粹是显示层的过滤。
+        """
+        total = len(self.results)
+        kw = (self.var_res_filter.get() or "").strip().lower()
+        hidden = getattr(self, "_hidden_iids", set())
+
+        def row_text(idx):
+            r = self.results[idx]
+            return " ".join(str(x or "") for x in (r[0], r[1], r[2], r[3])).lower()
+
+        if not kw:
+            # 清空筛选：按原始顺序整体接回，恢复初始行序
+            for idx in range(total):
+                iid = str(idx)
+                try:
+                    if self.tree_res.exists(iid):
+                        self.tree_res.reattach(iid, "", "end")
+                except Exception:
+                    pass
+            self._hidden_iids = set()
+            self.var_rows.set("{} 条".format(total))
+            self._update_empty(total == 0)
+            return
+
+        shown = 0
+        for idx in range(total):
+            iid = str(idx)
+            try:
+                if not self.tree_res.exists(iid):
+                    continue
+                hit = kw in row_text(idx)
+                if hit:
+                    # 只在确实被隐藏过时接回，避免多余的 reattach 打乱行序
+                    if iid in hidden:
+                        self.tree_res.reattach(iid, "", "end")
+                        hidden.discard(iid)
+                    shown += 1
+                elif iid not in hidden:
+                    self.tree_res.detach(iid)
+                    hidden.add(iid)
+            except Exception:
+                pass
+        self._hidden_iids = hidden
+        self.var_rows.set("{} / {} 条".format(shown, total))
+        self._update_empty(shown == 0)
 
     def _sort_results(self, col):
         # 带升降序切换 + 时间列按 datetime 排序 + 表头指示
