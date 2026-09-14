@@ -299,6 +299,38 @@ NODE_ICONS = {"device": "📁", "module": "📂", "file": "📄"}
 TCP_MAX_LINES = 2000        # 收发记录最多保留的行数
 TCP_MAX_DISPLAY = 4000      # 单条报文最多显示的字符数
 
+
+def local_ipv4_addresses():
+    """本机可用的 IPv4 地址（服务端要监听哪块网卡时用得上）。
+
+    不依赖 psutil：先用 getaddrinfo 拿主机名解析出的地址，再用一个 UDP
+    socket「连」一个不可达地址，让系统挑出默认出口网卡 —— 多网卡机器上
+    getaddrinfo 有时只给一个，这样至少能补上实际在用的那个。
+    """
+    ips = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            ip = info[4][0]
+            if ip and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))   # 只为选路由，不真的发包
+            ip = s.getsockname()[0]
+            if ip and ip not in ips:
+                ips.append(ip)
+        finally:
+            s.close()
+    except Exception:
+        pass
+    if "127.0.0.1" not in ips:
+        ips.append("127.0.0.1")
+    return ips
+
 # ---- 设计令牌 ----
 COLORS = {
     "bg":            "#f6f7fb",   # 应用背景
@@ -3208,7 +3240,9 @@ class App:
         var_host = tk.StringVar(
             value=tcp_cfg.get("host")
             or ("0.0.0.0" if var_server.get() else "127.0.0.1"))
-        ent_host = ttk.Entry(row1, textvariable=var_host, width=18)
+        # 用可下拉的输入框：客户端列出连过的设备地址，服务端列出本机网卡。
+        # 机器上好几块网卡时，手输错一个只是「连不上」，界面上看不出原因。
+        ent_host = ttk.Combobox(row1, textvariable=var_host, width=18, height=8)
         ent_host.pack(side="left", padx=(4, 10))
         tk.Label(row1, text="端口", bg=COLORS["card"], fg=COLORS["text"],
                  font=font_s).pack(side="left")
@@ -3489,15 +3523,42 @@ class App:
 
         def save_tcp_cfg():
             """记住连接参数，下次打开直接带出来。"""
+            cur = var_host.get().strip()
+            hosts = [h for h in (tcp_cfg.get("hosts") or []) if h]
+            # 用过、填过的对方地址记下来，下次从下拉里直接选
+            if cur and cur != "0.0.0.0" and cur not in hosts:
+                hosts.insert(0, cur)
             self.config["tcp"] = {
                 "server": bool(var_server.get()),
-                "host": var_host.get().strip(),
+                "host": cur,
+                "hosts": hosts[:12],       # 只留最近用过的几个
                 "port": var_port.get().strip(),
                 "hex": bool(var_hex.get()),
                 "nl": var_nl.get(),
                 "interval": var_interval.get().strip(),
             }
             self._save_config()
+
+        def host_choices():
+            """地址下拉的内容。
+
+            服务端给本机网卡列表 —— 监听错网卡就是「别的机器连不上」，
+            而界面上完全看不出原因；客户端给连过的设备地址，方便回头再连。
+            """
+            if var_server.get():
+                out = ["0.0.0.0"] + local_ipv4_addresses()
+            else:
+                out = [h for h in (tcp_cfg.get("hosts") or []) if h]
+            cur = var_host.get().strip()
+            if cur and cur not in out:
+                out.insert(0, cur)
+            return out
+
+        def refresh_host_choices():
+            try:
+                ent_host.configure(values=host_choices())
+            except Exception:
+                pass
 
         def on_mode_change():
             """切换模式时把地址调成合适的默认值。
@@ -3512,6 +3573,7 @@ class App:
                     var_host.set("0.0.0.0")
             elif cur in ("", "0.0.0.0"):
                 var_host.set("127.0.0.1")
+            refresh_host_choices()
 
         def use_cmd(k):
             item = cmds[k]
@@ -3618,6 +3680,7 @@ class App:
         # 地址 / 端口上回车直接连，省得再去够按钮
         ent_host.bind("<Return>", lambda e: do_connect())
         ent_port.bind("<Return>", lambda e: do_connect())
+        refresh_host_choices()
         win.protocol("WM_DELETE_WINDOW", on_close)
         # 故意不绑 Escape：这是个工具窗口，不是确认框。输入到一半误按就把
         # 整个窗口关掉太伤了，要关请点「关闭」
