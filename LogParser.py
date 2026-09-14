@@ -334,8 +334,12 @@ def center_window(win, owner=None, width=None, height=None):
     win.geometry("{}x{}+{}+{}".format(w, h, x, y))
 
 
-def make_dialog(owner, title, width, height, resizable=False):
-    """创建与主界面同一套配色的模态对话框。"""
+def make_dialog(owner, title, width, height, resizable=False, modal=True):
+    """创建与主界面同一套配色的对话框。
+
+    modal=False 用于可能同时开好几个、或需要与主窗对照查看的窗口
+    （详情、统计），这时不抢输入焦点。
+    """
     win = tk.Toplevel(owner)
     win.title(title)
     set_window_icon(win)
@@ -343,7 +347,8 @@ def make_dialog(owner, title, width, height, resizable=False):
     win.transient(owner)
     win.resizable(resizable, resizable)
     center_window(win, owner, width, height)
-    win.grab_set()
+    if modal:
+        win.grab_set()
     return win
 
 
@@ -1614,12 +1619,18 @@ class App:
         if not (0 <= idx < len(self.results)):
             return
         ts, mod, fname, text, path, lineno = self.results[idx]
-        win = tk.Toplevel(self.root)
-        win.transient(self.root)          # 置顶于主窗，避免被结果表盖住
-        win.title("详情 - {} {}".format(mod, ts))
-        win.geometry("920x640+220+140")   # 偏右上角显示，避开左侧文件树
-        info = tk.Text(win, height=3, borderwidth=0, background="#eef1f6",
-                       font=("Microsoft YaHei UI", 10), wrap="char")
+        # 非模态：可以同时开好几个详情对照着看
+        win = make_dialog(self.root, "详情 - {} {}".format(mod, ts),
+                          920, 660, resizable=True, modal=False)
+
+        # 顶部信息卡
+        info_card = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                             highlightbackground=COLORS["border"])
+        info_card.pack(fill="x", padx=12, pady=(12, 6))
+        info = tk.Text(info_card, height=3, borderwidth=0,
+                       background=COLORS["card"], foreground=COLORS["text"],
+                       font=("Microsoft YaHei UI", 9), wrap="char",
+                       padx=10, pady=8, highlightthickness=0)
         head = "文件：{}\n行号：{}    时间：{}".format(path, lineno, ts)
         reason = match_error_reason(text, self.error_patterns)
         if reason:
@@ -1627,14 +1638,25 @@ class App:
             head += "    ⚠ 判定为异常（命中关键词：{}）".format(reason)
         info.insert("1.0", head)
         info.configure(state="disabled")
-        info.pack(side="top", fill="x", padx=8, pady=(8, 2))
-        txt = tk.Text(win, wrap="none", font=("Consolas", 10), padx=8, pady=8)
-        ysb = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
-        xsb = ttk.Scrollbar(win, orient="horizontal", command=txt.xview)
+        info.pack(fill="x")
+
+        # 内容区：白底卡片 + 双向滚动条
+        body = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                        highlightbackground=COLORS["border"])
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        txt = tk.Text(body, wrap="none", font=("Consolas", 10), relief="flat",
+                      bg=COLORS["card"], fg=COLORS["text"],
+                      padx=10, pady=8, highlightthickness=0,
+                      selectbackground=COLORS["primary_hover_bg"],
+                      selectforeground=COLORS["text"])
+        ysb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+        xsb = ttk.Scrollbar(body, orient="horizontal", command=txt.xview)
         txt.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
-        txt.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=(0, 8))
-        ysb.pack(side="right", fill="y", pady=(0, 8))
-        xsb.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        txt.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+        xsb.grid(row=1, column=0, sticky="ew", padx=2, pady=(0, 2))
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
 
         # 标签样式
         txt.tag_configure("err", foreground="#c62828")
@@ -1644,6 +1666,9 @@ class App:
                           font=("Consolas", 10, "bold"))
         txt.tag_configure("val", foreground="#263238")
         txt.tag_configure("raw", foreground="#78909c")
+        # 命中的搜索关键词：加一层底色，便于在大段文本里定位
+        # （比 err/raw 后配置，优先级更高，会盖住它们的前景色）
+        txt.tag_configure("hl", background="#fff2a8", foreground="#7a4f01")
 
         structured = False
 
@@ -1694,18 +1719,53 @@ class App:
             txt.insert("end", "▼ 原始内容\n", "section")
         txt.insert("end", text, "raw")
 
-        if is_error_line(text):
+        # 高亮命中的搜索关键词：一段长文本里能立刻看到匹配位置
+        kws = []
+        raw_kw = self.var_kw.get().strip()
+        if raw_kw:
+            kws = [raw_kw] if self.var_regex.get() else [
+                k for k in raw_kw.split() if k]
+        use_re = bool(self.var_regex.get())
+        for kw in kws:
+            start = "1.0"
+            while True:
+                try:
+                    pos = txt.search(kw, start, stopindex="end",
+                                     nocase=True, regexp=use_re)
+                except Exception:
+                    break
+                if not pos:
+                    break
+                end = "{}+{}c".format(pos, len(kw))
+                txt.tag_add("hl", pos, end)
+                start = end
+
+        if is_error_line(text, self.error_patterns):
             txt.tag_add("err", "1.0", "end")
         txt.configure(state="disabled")
+
+        # 底部操作条
+        bar = tk.Frame(win, bg=COLORS["bg"])
+        bar.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(bar, text="复制全文", style="Ghost.TButton",
+                   command=lambda: self._copy(text)).pack(side="left")
+        ttk.Button(bar, text="打开原文件", style="Ghost.TButton",
+                   command=lambda: self._open_original(path)).pack(
+            side="left", padx=(8, 0))
+        ttk.Button(bar, text="关闭", style="Primary.TButton",
+                   command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def show_stats(self):
         sel = self._collect_selected()
         if not sel:
             messagebox.showinfo(APP_TITLE, "请先勾选要统计的文件 / 模块 / 设备")
             return
-        win = tk.Toplevel(self.root)
-        win.title("统计（{} 个文件）".format(len(sel)))
-        win.geometry("900x780")
+        # 尺寸按屏幕收缩：写死 780 高时，小屏或 150% 缩放会把底部按钮顶到屏幕外
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        win = make_dialog(self.root, "统计（{} 个文件）".format(len(sel)),
+                          min(900, int(sw * 0.9)), min(780, int(sh * 0.85)),
+                          resizable=True, modal=False)
         # 顶部信息条
         info = ttk.Label(win, text="统计中…", style="Muted.TLabel")
         info.pack(fill="x", padx=12, pady=(10, 0))
@@ -1728,6 +1788,8 @@ class App:
         btn_cancel.pack(side="right")
 
         def drain_progress():
+            if not win.winfo_exists():
+                return
             fdone = ftotal = lines = 0
             try:
                 while True:
@@ -1744,6 +1806,10 @@ class App:
             stats = q.get()
 
             def finish():
+                # 用户可能统计没跑完就把窗口关了：此时控件已销毁，
+                # 再 configure/pack 会抛 TclError，直接丢弃结果即可
+                if not win.winfo_exists():
+                    return
                 try:
                     prog.stop()
                 except Exception:
@@ -1757,6 +1823,15 @@ class App:
                 self._render_stats(win, info, canvas_frame, len(sel), stats)
             win.after(0, finish)
 
+        def on_stats_close():
+            # 关窗口就顺带停掉后台统计，否则它会继续读盘
+            worker.cancel = True
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", on_stats_close)
         worker.start()
         threading.Thread(target=wait_done, daemon=True).start()
         drain_progress()
