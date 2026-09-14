@@ -1768,8 +1768,11 @@ class App:
         body = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
                         highlightbackground=COLORS["border"])
         body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        txt = tk.Text(body, wrap="none", font=("Consolas", 10), relief="flat",
-                      bg=COLORS["card"], fg=COLORS["text"],
+        # 必须限制 height：Text 默认请求 24 行，在固定高度的窗口里这个请求
+        # 会先于后面的控件被满足，把底部的按钮行整个顶出窗口
+        # （expand=True 只分配「剩余」空间，请求过高时反而先把空间占光）
+        txt = tk.Text(body, wrap="none", font=("Consolas", 10), height=8,
+                      relief="flat", bg=COLORS["card"], fg=COLORS["text"],
                       padx=10, pady=8, highlightthickness=0,
                       selectbackground=COLORS["primary_hover_bg"],
                       selectforeground=COLORS["text"])
@@ -2109,7 +2112,9 @@ class App:
         rate = (err_total / total * 100) if total else 0.0
         info.configure(text="文件 {}    总行数 {}    异常 {} ({:.2f}%)".format(
             nfiles, total, err_total, rate))
-        txt = tk.Text(parent, wrap="none", font=("Consolas", 10))
+        # 同样要限制 height：不加的话它请求 24 行，会把统计窗口底部的
+        # 导出按钮顶到窗口外面去（与详情窗口同一个坑）
+        txt = tk.Text(parent, wrap="none", font=("Consolas", 10), height=8)
         ysb = ttk.Scrollbar(parent, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=ysb.set)
         txt.pack(side="left", fill="both", expand=True)
