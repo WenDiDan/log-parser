@@ -68,6 +68,19 @@ def main():
         print("[ERROR] 源清单缺少 version 字段")
         return 1
 
+    # 与 publish_gitee.py / publish_github.py 对齐：防止用旧 exe 配新清单。
+    # 离线升级源最容易踩这个坑——现场设备连不上外网，升完发现程序还是旧版，
+    # 远程也没法回退，只能去机器前手动换。
+    try:
+        from check_version import exe_matches_version, exe_file_version
+        if exe_matches_version(SRC_EXE, ver) is False:
+            print("[ERROR] 待发布的 exe 文件版本是 {}，与清单版本 {} 不一致。".format(
+                exe_file_version(SRC_EXE), ver))
+            print("        请先在「发布工具」里重新打包，避免用旧 exe 发布新版本。")
+            return 1
+    except ImportError:
+        pass
+
     src_size = os.path.getsize(SRC_EXE)
     print("============================================")
     print(" 目标目录: " + target)

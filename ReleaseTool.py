@@ -4,7 +4,7 @@
 把打包与发布的全流程（check_version.py、build_inproc.py、publish_gitee.py、
 publish_github.py、publish_local.py、verify_release.py）融合到一个窗口：
 
-    1 检查版本一致性    2 打包（PyInstaller）
+    1 发布前检查        2 打包（PyInstaller）
     3 发布（Gitee / GitHub / 本地目录）   4 发布后自检
 
 也可以直接点「一键全流程」按顺序跑完四步。
@@ -56,7 +56,18 @@ MONO = ("Consolas", 9)
 
 from build_args import BUILD_ARGS   # 与 build_inproc.py 共用同一份
 
-STEP_NAMES = ["1 检查版本", "2 打包", "3 发布", "4 发布后自检"]
+# exe 的文件版本比对直接复用 check_version.py —— publish_gitee.py /
+# publish_github.py 也用它，避免同一件事出现两套读法、两边结论不一致。
+try:
+    from check_version import exe_file_version, exe_matches_version
+except Exception:                      # 单独拷走本工具时也不能崩
+    def exe_file_version(_path):
+        return ""
+
+    def exe_matches_version(_path, _expect):
+        return None
+
+STEP_NAMES = ["1 发布前检查", "2 打包", "3 发布", "4 发布后自检"]
 STEP_COLORS = {"idle": IDLE_C, "run": RUN_C, "ok": OK_C, "fail": BAD_C,
                "warn": RUN_C, "cancel": MUTED}
 
@@ -87,6 +98,90 @@ def read_manifest_field(path, key):
             return str(json.load(f).get(key) or "")
     except Exception:
         return ""
+
+
+def exe_version_problem(exe_path, expect):
+    """exe 的文件版本与清单不一致时返回描述文本；一致或无法判断返回 None。
+
+    publish_gitee.py / publish_github.py 里也拦了这件事，但要等发布脚本
+    真正跑起来才报错；提前在界面里比一次，能省掉一整轮白等。
+    """
+    if not expect or not os.path.isfile(exe_path):
+        return None
+    if exe_matches_version(exe_path, expect) is not False:
+        return None
+    raw = exe_file_version(exe_path)
+    core = ".".join(str(int(x)) for x in re.findall(r"\d+", raw)[:3])
+    return "打包产物是 v{}，清单是 v{}".format(core or "?", expect)
+
+
+def _git_env():
+    env = dict(os.environ)
+    # 缺凭据时让 git 立刻失败：后台线程里等用户输入看起来就像界面卡死
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
+def git_available():
+    try:
+        return subprocess.run(["git", "--version"], capture_output=True,
+                              timeout=20,
+                              creationflags=CREATE_NO_WINDOW).returncode == 0
+    except Exception:
+        return False
+
+
+def run_git(args, timeout=60):
+    """执行一条 git 命令，返回 (退出码, 合并后的输出)。"""
+    try:
+        p = subprocess.run(["git", "--no-pager"] + list(args), cwd=HERE,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, env=_git_env(),
+                           creationflags=CREATE_NO_WINDOW)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except Exception as exc:
+        return -1, str(exc)
+
+
+def git_is_repo():
+    return run_git(["rev-parse", "--is-inside-work-tree"])[0] == 0
+
+
+def git_changes():
+    """未提交的改动（含未跟踪文件）；读不到返回 None。"""
+    rc, out = run_git(["status", "--porcelain"])
+    if rc != 0:
+        return None
+    return [ln.rstrip() for ln in out.splitlines() if ln.strip()]
+
+
+def git_has_tag(tag):
+    rc, out = run_git(["tag", "--list", tag])
+    return rc == 0 and bool(out.strip())
+
+
+def _git_config(key):
+    rc, out = run_git(["config", "--get", key])
+    return out.strip() if rc == 0 else ""
+
+
+def git_identity():
+    """返回提交身份 (name, email)；没配置时回退到最近一次提交的作者。
+
+    这台机器上 git 的 user.name / user.email 根本没配（平时的提交都是
+    临时用 -c 指定的），直接 commit 必然失败。从已有提交里推断一个默认值，
+    才不会把工具卡死在这一步。全新仓库（一次提交都没有）推断不出来，
+    返回空串，由调用方提示用户去配。
+    """
+    name, email = _git_config("user.name"), _git_config("user.email")
+    if name and email:
+        return name, email
+    rc, out = run_git(["log", "-1", "--format=%an%n%ae"])
+    if rc == 0:
+        lines = [x.strip() for x in out.splitlines() if x.strip()]
+        if len(lines) >= 2:
+            return name or lines[0], email or lines[1]
+    return name, email
 
 
 def suggest_next_version(ver):
@@ -409,8 +504,10 @@ class ReleaseTool:
         self.lbl_bump.pack(side="left")
         ttk.Button(ver_row, text="升级版本…",
                    command=self.on_bump).pack(side="left", padx=(10, 0))
+        ttk.Button(ver_row, text="提交并打 tag",
+                   command=self.on_git_commit).pack(side="left", padx=(8, 0))
         tk.Label(ver_row,
-                 text="改源码 + 同步 version.txt / 各清单 + 更新升级提示",
+                 text="升版本会同步各清单；提交会把源码入库并打上对应标签",
                  bg=CARD, fg=MUTED, font=FG_S).pack(side="left", padx=(10, 0))
 
         btns = tk.Frame(inner, bg=CARD)
@@ -419,7 +516,7 @@ class ReleaseTool:
                                   command=self.on_all)
         self.btn_all.pack(side="left")
         self.btn_steps = []
-        for text, cb in (("检查版本", self.on_check), ("打包", self.on_build),
+        for text, cb in (("发布前检查", self.on_check), ("打包", self.on_build),
                          ("发布", self.on_publish), ("发布后自检", self.on_verify)):
             b = ttk.Button(btns, text=text, command=cb)
             b.pack(side="left", padx=(8, 0))
@@ -588,6 +685,39 @@ class ReleaseTool:
             raise RuntimeError("没有可用的 Python 解释器（环境检测未完成或失败）")
         return [self.py_pub, "-u", os.path.join(HERE, script)] + list(args)
 
+    def _check_git(self, w, ver):
+        """发布前 git 检查：改动没提交、标签没打，发出去的包就无从追溯。
+
+        只提醒、不自动提交 —— 提交范围必须由用户确认（见 on_git_commit）。
+        """
+        if not git_available():
+            w.log("（未检测到 git，跳过提交检查）")
+            return False
+        if not git_is_repo():
+            w.log("（当前目录不是 git 仓库，跳过提交检查）")
+            return False
+        changes = git_changes()
+        if changes is None:
+            w.log("[WARN] 无法读取 git 状态，跳过提交检查")
+            return True
+        warned = False
+        if changes:
+            w.log("[WARN] 有 {} 项改动还没提交：".format(len(changes)))
+            for ln in changes[:12]:
+                w.log("       " + ln)
+            if len(changes) > 12:
+                w.log("       …（共 {} 项）".format(len(changes)))
+            w.log("       点「提交并打 tag」可把源码与标签一起补上")
+            warned = True
+        else:
+            w.log("git 工作区干净")
+        if git_has_tag("v" + ver):
+            w.log("已存在标签 v{}".format(ver))
+        else:
+            w.log("[WARN] 还没有标签 v{} —— 发出去的包不好对应到具体提交".format(ver))
+            warned = True
+        return warned
+
     def _step_check(self):
         def do(w):
             if not w.run_cmd(self._py("check_version.py")):
@@ -597,20 +727,42 @@ class ReleaseTool:
             # 实时读源码版本：外部可能刚改过（git 回滚、手工编辑、另一个窗口），
             # 用界面缓存的值去比对清单会误判
             cur = read_app_version()
+            self.root.after(0, self._refresh_version)
+            warn = False
+
+            # 1) 清单里的升级提示文案有没有跟上版本号
             stale = []
             for rel in MANIFESTS:
                 note = read_manifest_field(os.path.join(HERE, *rel.split("/")), "notes")
                 if note and ("v" + cur) not in note:
                     stale.append(rel)
-            self.root.after(0, self._refresh_version)
             if stale:
                 w.log("[WARN] 以下清单的升级提示里没有 v{}：{}".format(
                     cur, "、".join(stale)))
                 w.log("       现场用户升级后会看到旧版本说明，建议先用「升级版本…」")
-                return "warn"
-            w.log("版本一致，且清单提示文案已包含 v{}".format(cur))
-            return True
-        return (0, "检查版本一致性", do)
+                warn = True
+            else:
+                w.log("版本一致，且清单提示文案已包含 v{}".format(cur))
+
+            # 2) 打包产物是不是当前版本。发布脚本里也拦了同一件事，但那是
+            #    点下「发布」之后才报错；这里先看一眼，能省掉一整轮白等。
+            #    只警告不中断：「升级版本」刚跑完时 exe 必然还是旧的，
+            #    紧接着的「打包」会让它变一致。
+            exe = os.path.join(HERE, "dist", "LogParser.exe")
+            problem = exe_version_problem(exe, cur)
+            if problem:
+                w.log("[WARN] " + problem)
+                w.log("       点「打包」重新生成即可（打包后此检查会自动通过）")
+                warn = True
+            elif os.path.isfile(exe):
+                w.log("打包产物版本 OK：v" + cur)
+
+            # 3) 源码有没有提交、标签有没有打
+            if self._check_git(w, cur):
+                warn = True
+
+            return "warn" if warn else True
+        return (0, "发布前检查", do)
 
     def _step_bump(self, new_ver):
         """升级版本号：改源码唯一真源，再让 check_version.py 同步其余清单。
@@ -716,6 +868,106 @@ class ReleaseTool:
         self.lbl_ver.configure(text="当前版本  v" + self.ver)
         self.lbl_bump.configure(text="v" + self.ver)
 
+    def _step_git_commit(self, ver):
+        """提交工作区改动、打上 vX.Y.Z 标签，并尝试推送。
+
+        推送失败只算警告：这个仓库的远程经常连不上，但「源码已经进本地
+        版本库」这件事本身是成功的，不该因此显示成失败。
+        """
+        tag = "v" + ver
+        msg = "chore(release): " + tag
+
+        def do(w):
+            if not git_available() or not git_is_repo():
+                w.log("!! 当前目录不是 git 仓库，无法提交")
+                return False
+            name, email = git_identity()
+            if not name or not email:
+                w.log("!! 无法确定提交身份（git 里没配置，也没有历史提交可参考）")
+                w.log('   请先执行 git config --global user.name "你的名字"')
+                w.log('   以及     git config --global user.email "你的邮箱"')
+                return False
+            w.log("提交身份: {} <{}>".format(name, email))
+
+            if not w.run_cmd(["git", "add", "-A"]):
+                return False
+            rc, out = run_git(["-c", "user.name=" + name,
+                               "-c", "user.email=" + email,
+                               "commit", "-m", msg])
+            if rc != 0 and "nothing to commit" not in out and "无文件要提交" not in out:
+                w.log("!! 提交失败：" + out)
+                return False
+            w.log("已提交：" + msg)
+
+            if git_has_tag(tag):
+                w.log("标签 {} 已存在，跳过".format(tag))
+            elif not w.run_cmd(["git", "tag", "-a", tag, "-m", msg]):
+                return False
+
+            if run_git(["remote", "get-url", "origin"])[0] != 0:
+                w.log("（没有配置远程 origin，跳过推送）")
+                return True
+            warned = False
+            rc, out = run_git(["push", "origin", "HEAD"], timeout=180)
+            if rc != 0:
+                w.log("[WARN] 推送失败，源码已进本地仓库；网络恢复后 git push 即可")
+                w.log("       " + (out.splitlines()[0] if out else ""))
+                warned = True
+            rc, out = run_git(["push", "origin", tag], timeout=180)
+            if rc != 0:
+                # 有些仓库配置成不推送标签，所以才单独推一次
+                w.log("[WARN] 标签推送失败，网络恢复后执行 git push origin {}".format(tag))
+                warned = True
+            if not warned:
+                w.log("已推送到 origin")
+            return "warn" if warned else True
+        return (0, "提交并打 tag " + tag, do)
+
+    def on_git_commit(self):
+        if self.busy:
+            return
+        self._refresh_version()
+        ver = self.ver
+        if not git_available():
+            messagebox.showwarning("不可用", "没有检测到 git 命令。")
+            return
+        if not git_is_repo():
+            messagebox.showwarning("不是 git 仓库",
+                                   "当前目录不是 git 仓库：\n" + HERE)
+            return
+        name, email = git_identity()
+        if not name or not email:
+            messagebox.showwarning(
+                "缺少 git 身份",
+                "git 里没有配置提交身份，也没有历史提交可以参考。\n"
+                "请先在命令行执行：\n\n"
+                '  git config --global user.name "你的名字"\n'
+                '  git config --global user.email "你的邮箱"')
+            return
+        changes = git_changes()
+        if changes is None:
+            messagebox.showwarning("读取失败", "无法读取 git 状态。")
+            return
+        if not changes:
+            extra = "" if git_has_tag("v" + ver) else "\n\n但还没有标签 v{}。".format(ver)
+            messagebox.showinfo("无需提交", "工作区是干净的，没有需要提交的改动。" + extra)
+            return
+
+        preview = "\n".join(changes[:10])
+        if len(changes) > 10:
+            preview += "\n…（共 {} 项）".format(len(changes))
+        if not messagebox.askyesno(
+                "提交并打 tag",
+                "将提交以下 {} 项改动：\n\n{}\n\n"
+                "提交信息  chore(release): v{ver}\n"
+                "创建标签  v{ver}\n"
+                "提交身份  {name} <{email}>\n"
+                "然后尝试推送到 origin\n\n"
+                "继续？".format(len(changes), preview, ver=ver,
+                                name=name, email=email)):
+            return
+        self._start([self._step_git_commit(ver)], active={0})
+
     def _step_build(self):
         def do(w):
             if not self.py_build:
@@ -757,6 +1009,17 @@ class ReleaseTool:
                 w.log("!! 同步产物失败: {}".format(exc))
                 return False
             w.log("已同步产物 -> github-release\\LogParser.exe")
+
+            # 打完包立刻确认版本号真的烙进 exe 了：version.txt 没同步时
+            # PyInstaller 不会报错，打出来的包版本号却是旧的，要等发布
+            # 脚本拒绝、或者现场升级后才发现。
+            cur = read_app_version()
+            if exe_matches_version(src, cur) is False:
+                w.log("!! 打包产物的文件版本是 {}，与当前版本 v{} 不一致".format(
+                    exe_file_version(src) or "?", cur))
+                w.log("   version.txt 可能没同步：先跑 check_version.py --fix 再打包")
+                return False
+            w.log("打包产物版本校验 OK（v{}）".format(cur))
             return True
         return (1, "打包（PyInstaller）", do)
 

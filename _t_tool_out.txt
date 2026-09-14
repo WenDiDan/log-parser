@@ -1,0 +1,24 @@
+源码 APP_VERSION    = 1.0.17
+清单 version        = 1.0.17
+dist exe 文件版本   = 1.0.17.0
+
+-- exe_version_problem --
+对当前清单 v1.0.17 : None
+对 exe 自身 v1.0.17.0: None
+清单为空        : None
+文件不存在      : None
+
+-- git --
+git_available   = True
+git_is_repo     = True
+git_user_name   = ''
+git_has_tag(v1.0.17) = False
+git_changes     = 3 项
+      M ReleaseTool.py
+       M publish_local.py
+      ?? _t_tool.py
+HEAD            = ea36a99 fix(ui): the detail window button bar was pushed out of the window
+分支            = ## main...origin/main [ahead 5]
+
+-- 步骤标题 --
+STEP_NAMES = ['1 发布前检查', '2 打包', '3 发布', '4 发布后自检']
