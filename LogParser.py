@@ -3202,6 +3202,19 @@ class App:
         """
         win = make_dialog(self.root, "TCP 调试工具", 1000, 680,
                           resizable=True, modal=False)
+        # 「断开」和「连接」共用同一个按钮位置，用红色区分开更醒目
+        try:
+            st_tcp = ttk.Style(win)
+            st_tcp.configure("TcpStop.TButton",
+                             font=("Microsoft YaHei UI", 9, "bold"),
+                             padding=(14, 6), background=COLORS["danger"],
+                             foreground="#ffffff", borderwidth=0)
+            st_tcp.map("TcpStop.TButton",
+                       background=[("active", "#991b1b"),
+                                   ("disabled", "#e3b6b6")],
+                       foreground=[("disabled", "#f8eaea")])
+        except Exception:
+            pass
         out_q = queue.Queue()
         # 运行时状态。装进 dict 是为了在闭包里改起来方便（不必给每个内部
         # 函数都加 nonlocal）；值类型混杂，所以显式标注成 dict 避免误判。
@@ -3229,12 +3242,14 @@ class App:
         row1 = tk.Frame(inner, bg=COLORS["card"])
         row1.pack(fill="x")
         var_server = tk.BooleanVar(value=bool(tcp_cfg.get("server")))
-        ttk.Radiobutton(row1, text="客户端", value=False, variable=var_server,
-                        command=lambda: on_mode_change()).pack(side="left")
-        ttk.Radiobutton(row1, text="服务端（监听）", value=True,
-                        variable=var_server,
-                        command=lambda: on_mode_change()).pack(side="left",
-                                                               padx=(6, 14))
+        rb_client = ttk.Radiobutton(row1, text="客户端", value=False,
+                                    variable=var_server,
+                                    command=lambda: on_mode_change())
+        rb_client.pack(side="left")
+        rb_server = ttk.Radiobutton(row1, text="服务端（监听）", value=True,
+                                    variable=var_server,
+                                    command=lambda: on_mode_change())
+        rb_server.pack(side="left", padx=(6, 14))
         tk.Label(row1, text="地址", bg=COLORS["card"], fg=COLORS["text"],
                  font=font_s).pack(side="left")
         var_host = tk.StringVar(
@@ -3467,10 +3482,29 @@ class App:
             btn_timer.configure(text="停止定时")
             append("sys", "开始定时发送：每 {} 毫秒一次".format(ms))
 
+        def set_locked(locked):
+            """连接期间锁住模式和地址端口。
+
+            连着的时候还能改参数，界面上显示的就和实际连着的那条对不上了
+            （改了地址却没断开，看起来像已经连到新地址）。锁上省心。
+            """
+            st = "disabled" if locked else "normal"
+            for w in (rb_client, rb_server, ent_host, ent_port):
+                try:
+                    w.configure(state=st)
+                except Exception:
+                    pass
+            try:
+                btn_conn.configure(
+                    style="TcpStop.TButton" if locked else "Primary.TButton")
+            except Exception:
+                pass
+
         def on_closed():
             """会话结束（对端断开、出错或主动断开）后恢复界面。"""
             session["sess"] = None
             stop_timer()
+            set_locked(False)
             btn_conn.configure(text="连接")
             lbl_conn.configure(text="未连接", fg=COLORS["muted"])
 
@@ -3480,6 +3514,7 @@ class App:
                 session["sess"] = None
                 append("sys", "正在断开…")
                 sess.stop()
+                on_closed()          # 立刻解锁，不必等 closed 事件绕回来
                 return
             host = var_host.get().strip()
             try:
@@ -3497,6 +3532,7 @@ class App:
             update_counts()
             sess = TcpSession(out_q, host, port, as_server=var_server.get())
             session["sess"] = sess
+            set_locked(True)         # 连接期间不许再改参数
             btn_conn.configure(text="断开")
             lbl_conn.configure(text="连接中…", fg=COLORS["primary"])
             sess.start()
