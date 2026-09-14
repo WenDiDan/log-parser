@@ -11,6 +11,7 @@ import os
 import re
 import csv
 import sys
+import time
 import json
 import queue
 import calendar
@@ -80,7 +81,7 @@ except Exception:
     pass
 
 APP_TITLE = "设备日志解析器"
-APP_VERSION = "1.0.14"           # 当前版本号（与 version.txt / version.json 保持一致）
+APP_VERSION = "1.0.15"           # 当前版本号（与 version.txt / version.json 保持一致）
 
 # 远程升级：更新清单地址（version.json）。
 # 支持两种形式，二选一改为你的实际地址即可：
@@ -1110,12 +1111,60 @@ class App:
         self._save_config()
 
     def load_dir(self, d, silent=False):
+        """加载日志目录。
+
+        遍历（os.walk）放到后台线程：日志目录常常在网络共享盘上
+        （如 \\\\server\\share），在主线程里遍历会让界面整段「未响应」，
+        启动时自动恢复上次目录尤其明显。
+        """
         self._cancel_worker()
-        self.files = iter_log_files(d)
-        if not self.files:
+        if getattr(self, "_loading_dir", False):
+            self.var_status.set("正在扫描目录，请稍候…")
+            return
+        self._loading_dir = True
+        self.var_status.set("正在扫描目录…")
+        try:
+            self.root.config(cursor="watch")
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(12)
+        except Exception:
+            pass
+
+        def work():
+            files, err = [], None
+            try:
+                files = iter_log_files(d)
+            except Exception as exc:
+                err = exc
+            self.root.after(0, lambda: self._on_dir_scanned(d, files, err, silent))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_dir_scanned(self, d, files, err, silent):
+        """目录扫描结束（回到主线程）：校验结果并建树。"""
+        self._loading_dir = False
+        try:
+            self.progress.stop()
+            self.progress.configure(mode="determinate", value=0)
+            self.root.config(cursor="")
+        except Exception:
+            pass
+        if err is not None:
+            self.var_status.set("目录扫描失败：{}".format(err))
+            if not silent:
+                messagebox.showerror(APP_TITLE,
+                                     "无法读取目录：\n{}\n\n{}".format(d, err))
+            return
+        if not files:
+            self.var_status.set("未找到 .txt 日志文件：{}".format(d))
             if not silent:
                 messagebox.showwarning(APP_TITLE, "该目录下未找到 .txt 日志文件")
             return
+        self._build_file_tree(d, files)
+
+    def _build_file_tree(self, d, files):
+        """把扫描结果填进文件树（只能在主线程执行）。"""
+        self.files = files
         self.last_dir = d
         self.tree_files.delete(*self.tree_files.get_children(""))
         self.check_state.clear()
@@ -1366,29 +1415,33 @@ class App:
         return None
 
     def _poll(self):
-        # 每轮最多处理一个结果 batch，避免一次性插入大量行导致主线程卡死（窗口显示「未响应」）
+        # 单轮最多占用主线程 50ms：太少会刷屏很慢（结果多时一条条往外蹦），
+        # 太多又会卡住界面。用「时间预算」而不是「每轮只吃一个 batch」兼顾两者。
+        deadline = time.monotonic() + 0.05
         done = False
-        try:
-            item = self.out_q.get_nowait()
+        while time.monotonic() <= deadline:
+            try:
+                item = self.out_q.get_nowait()
+            except queue.Empty:
+                break
             if item is None:
                 done = True
-            else:
-                # 非搜索态（已停止 / 已清空）收到的残留 batch 直接丢弃，
-                # 避免停止后结果还在往表格里灌
-                if getattr(self, "_searching", False):
-                    for ts, mod, fname, text, path, lineno in item:
-                        is_err = is_error_line(text)
-                        tags = ["odd" if len(self.results) % 2 else "even"]
-                        if is_err:
-                            tags.append("err")
-                        # 用 results 的下标作为 iid：排序只改变表格显示顺序，
-                        # 双击详情/右键菜单仍可用 iid 精确定位到原始行
-                        self.tree_res.insert("", "end", iid=str(len(self.results)), values=(
-                            ts, mod, fname, text if len(text) <= 500 else text[:500] + "…"),
-                            tags=tuple(tags))
-                        self.results.append((ts, mod, fname, text, path, lineno))
-        except queue.Empty:
-            pass
+                break
+            # 非搜索态（已停止 / 已清空）收到的残留 batch 直接丢弃，
+            # 避免停止后结果还在往表格里灌
+            if not getattr(self, "_searching", False):
+                continue
+            for ts, mod, fname, text, path, lineno in item:
+                is_err = is_error_line(text)
+                tags = ["odd" if len(self.results) % 2 else "even"]
+                if is_err:
+                    tags.append("err")
+                # 用 results 的下标作为 iid：排序只改变表格显示顺序，
+                # 双击详情/右键菜单仍可用 iid 精确定位到原始行
+                self.tree_res.insert("", "end", iid=str(len(self.results)), values=(
+                    ts, mod, fname, text if len(text) <= 500 else text[:500] + "…"),
+                    tags=tuple(tags))
+                self.results.append((ts, mod, fname, text, path, lineno))
 
         # 进度队列消息很轻，全部消费掉
         try:
