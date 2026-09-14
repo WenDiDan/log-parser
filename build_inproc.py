@@ -45,7 +45,10 @@ _parent.Python = _InProcPython
 _bm.isolated.Python = _InProcPython
 
 # 与 ReleaseTool.py 共用同一份打包参数（build_args.py），避免两边写偏
-from build_args import BUILD_ARGS as argv
+from build_args import BUILD_ARGS
+
+# 透传额外参数：可以加 --distpath/--workpath 在不影响 dist/ 的前提下试打包
+argv = list(BUILD_ARGS) + sys.argv[1:]
 
 from PyInstaller.__main__ import run
 

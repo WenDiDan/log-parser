@@ -28,5 +28,11 @@ BUILD_ARGS = [
     # 因此这里排除掉，exe 体积大约减半——统计界面从柱状图变文本表。
     "--exclude-module=matplotlib",
     "--exclude-module=numpy",
+    # PIL 只用它读 .ico 图标并缩放，其余格式支持全是白带的体积：
+    # _avif.pyd 一个就 7.5MB（占整包四成），_webp/_imagingcms 也用不到，
+    # 真正必需的只有 _imaging.pyd。
+    "--exclude-module=PIL.AvifImagePlugin",
+    "--exclude-module=PIL.WebPImagePlugin",
+    "--exclude-module=PIL.ImageCms",
     "LogParser.py",
 ]

@@ -10,7 +10,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy'],
+    excludes=['matplotlib', 'numpy', 'PIL.AvifImagePlugin', 'PIL.WebPImagePlugin', 'PIL.ImageCms'],
     noarchive=False,
     optimize=0,
 )
