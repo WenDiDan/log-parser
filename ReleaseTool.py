@@ -594,25 +594,37 @@ class ReleaseTool:
                 w.log("!! 版本不一致：可点「升级版本…」一键同步，"
                       "或手动运行 check_version.py --fix")
                 return False
-            # 版本号改了但升级提示文案没跟上，现场用户会看到「升级至 v旧版本」
+            # 实时读源码版本：外部可能刚改过（git 回滚、手工编辑、另一个窗口），
+            # 用界面缓存的值去比对清单会误判
+            cur = read_app_version()
             stale = []
             for rel in MANIFESTS:
                 note = read_manifest_field(os.path.join(HERE, *rel.split("/")), "notes")
-                if note and ("v" + self.ver) not in note:
+                if note and ("v" + cur) not in note:
                     stale.append(rel)
+            self.root.after(0, self._refresh_version)
             if stale:
                 w.log("[WARN] 以下清单的升级提示里没有 v{}：{}".format(
-                    self.ver, "、".join(stale)))
+                    cur, "、".join(stale)))
                 w.log("       现场用户升级后会看到旧版本说明，建议先用「升级版本…」")
                 return "warn"
-            w.log("版本一致，且清单提示文案已包含 v{}".format(self.ver))
+            w.log("版本一致，且清单提示文案已包含 v{}".format(cur))
             return True
         return (0, "检查版本一致性", do)
 
-    def _step_bump(self, old_ver, new_ver):
-        """升级版本号：改源码唯一真源，再让 check_version.py 同步其余清单。"""
+    def _step_bump(self, new_ver):
+        """升级版本号：改源码唯一真源，再让 check_version.py 同步其余清单。
+
+        当前版本在运行时重新读取，不使用界面缓存——外部可能刚改过
+        （git 回滚、手工编辑、另一个窗口），拿旧值去匹配会直接失败。
+        """
         def do(w):
             src = os.path.join(HERE, "LogParser.py")
+            old_ver = read_app_version()
+            if old_ver == new_ver:
+                w.log("源码版本已经是 v{}，无需修改".format(new_ver))
+                return True
+            w.log("源码当前版本: v{}".format(old_ver))
             try:
                 with open(src, "r", encoding="utf-8") as f:
                     text = f.read()
@@ -665,11 +677,13 @@ class ReleaseTool:
                 return False
             self.root.after(0, self._refresh_version)
             return True
-        return (0, "升级版本 v{} -> v{}".format(old_ver, new_ver), do)
+        # 旧版本要到运行时才读得到，这里只用目标版本命名这一步
+        return (0, "升级版本 -> v{}".format(new_ver), do)
 
     def on_bump(self):
         if self.busy:
             return
+        self._refresh_version()          # 先按文件实际版本刷新，避免用旧值
         new = simpledialog.askstring(
             "升级版本", "输入新版本号（当前 v{}）：".format(self.ver),
             initialvalue=suggest_next_version(self.ver), parent=self.root)
@@ -695,7 +709,7 @@ class ReleaseTool:
                 "  · 清单里的升级提示文案与发布日期\n\n"
                 "继续？".format(old=self.ver, new=new)):
             return
-        self._start([self._step_bump(self.ver, new)], active={0})
+        self._start([self._step_bump(new)], active={0})
 
     def _refresh_version(self):
         self.ver = read_app_version()
@@ -822,6 +836,9 @@ class ReleaseTool:
     def _start(self, steps, active=None):
         if self.busy:
             return
+        # 每次开跑都按文件里的实际版本刷新一次：版本可能被外部改过
+        # （git 回滚、手工编辑、另一个工具窗口），界面缓存不可信。
+        self._refresh_version()
         if not self.py_pub:
             messagebox.showwarning(
                 "环境未就绪",
