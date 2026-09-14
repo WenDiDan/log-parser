@@ -278,7 +278,12 @@ def gen_updater(target, src, pid):
     )
     return t.replace("{PID}", str(pid)).replace("{SRC}", src).replace("{TARGET}", target)
 LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\](.*)$")
-ERROR_PATTERNS = ('ResultFlag":false', '"ResultFlag": false', "失败", "异常", "ERROR", "Error", "超时", "超时。", "错误")
+# 异常判定关键词（朴素子串匹配，命中即算异常）。
+# 注意：「超时」「失败」这类短词会误伤「超时设置」「失败重试次数」等正常文案，
+# 因此详情窗口会显示究竟命中了哪个词，方便人工确认是真异常还是误判。
+# 原来的 "超时。" 是被 "超时" 覆盖的冗余项，已去掉。
+ERROR_PATTERNS = ('ResultFlag":false', '"ResultFlag": false', "失败", "异常",
+                  "ERROR", "Error", "超时", "错误")
 MAX_RESULTS = 50000          # 结果上限，防止内存爆
 BATCH = 100                   # 后台每批行数（控制 UI 单次刷新量）
 
@@ -396,8 +401,21 @@ def iter_log_files(root):
     return files
 
 
+def match_error_reason(text):
+    """返回命中的异常关键词；没命中返回 None。
+
+    判定用的是朴素子串匹配，所以「超时设置」「失败重试次数」这类正常文案
+    也会命中。与其悄悄改判定规则，不如把命中的词暴露到界面上（详情窗口），
+    让用户一眼看出是真异常还是误判。
+    """
+    for p in ERROR_PATTERNS:
+        if p in text:
+            return p
+    return None
+
+
 def is_error_line(text):
-    return any(p in text for p in ERROR_PATTERNS)
+    return match_error_reason(text) is not None
 
 
 def read_lines(path):
@@ -1549,10 +1567,25 @@ class App:
             return (0, "", val)
 
         items = self.tree_res.get_children("")
+        # 大结果时逐个 move 会占用主线程几秒，先给个忙碌提示，
+        # 否则用户会以为界面卡死了
+        busy = len(items) > 2000
+        if busy:
+            self.var_status.set("正在排序 {} 条…".format(len(items)))
+            try:
+                self.root.config(cursor="watch")
+                self.root.update_idletasks()
+            except Exception:
+                pass
         data = [(sort_key(i), i) for i in items]
         data.sort(key=lambda x: x[0], reverse=not state["asc"])
         for idx, (_, i) in enumerate(data):
             self.tree_res.move(i, "", idx)
+        if busy:
+            try:
+                self.root.config(cursor="")
+            except Exception:
+                pass
 
         # 更新表头：当前排序列加 ▲/▼ 指示
         labels = {"time": "时间", "module": "模块", "file": "文件", "text": "内容"}
@@ -1576,9 +1609,14 @@ class App:
         win.transient(self.root)          # 置顶于主窗，避免被结果表盖住
         win.title("详情 - {} {}".format(mod, ts))
         win.geometry("920x640+220+140")   # 偏右上角显示，避开左侧文件树
-        info = tk.Text(win, height=2, borderwidth=0, background="#eef1f6",
+        info = tk.Text(win, height=3, borderwidth=0, background="#eef1f6",
                        font=("Microsoft YaHei UI", 10), wrap="char")
-        info.insert("1.0", "文件：{}\n行号：{}    时间：{}".format(path, lineno, ts))
+        head = "文件：{}\n行号：{}    时间：{}".format(path, lineno, ts)
+        reason = match_error_reason(text)
+        if reason:
+            # 把判定依据摊开：子串匹配会误伤「超时设置」这类正常文案
+            head += "    ⚠ 判定为异常（命中关键词：{}）".format(reason)
+        info.insert("1.0", head)
         info.configure(state="disabled")
         info.pack(side="top", fill="x", padx=8, pady=(8, 2))
         txt = tk.Text(win, wrap="none", font=("Consolas", 10), padx=8, pady=8)
@@ -1898,21 +1936,38 @@ class App:
                       else [("文本文件", "*.txt")])
         if not path:
             return
-        try:
-            if fmt == "csv":
-                with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                    w = csv.writer(f)
-                    w.writerow(["时间", "模块", "文件", "行号", "内容"])
-                    for ts, mod, fname, text, p, lineno in self.results:
-                        w.writerow([ts, mod, fname, lineno, text])
-            else:
-                with open(path, "w", encoding="utf-8") as f:
-                    for ts, mod, fname, text, p, lineno in self.results:
-                        f.write("[{}] [{}] [{}:{}] {}\n".format(ts, mod, fname, lineno, text))
-        except OSError as e:
-            messagebox.showerror(APP_TITLE, "导出失败：{}".format(e))
+        # 导出放到后台线程：结果多时同步写盘会让窗口整段假死
+        rows = list(self.results)
+        total = len(rows)
+        self.var_status.set("正在导出 {} 条…".format(total))
+
+        def work():
+            try:
+                if fmt == "csv":
+                    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                        w = csv.writer(f)
+                        w.writerow(["时间", "模块", "文件", "行号", "内容"])
+                        for ts, mod, fname, text, p, lineno in rows:
+                            w.writerow([ts, mod, fname, lineno, text])
+                else:
+                    with open(path, "w", encoding="utf-8") as f:
+                        for ts, mod, fname, text, p, lineno in rows:
+                            f.write("[{}] [{}] [{}:{}] {}\n".format(
+                                ts, mod, fname, lineno, text))
+            except Exception as exc:
+                self.root.after(0, lambda: self._on_export_done(total, path, exc))
+                return
+            self.root.after(0, lambda: self._on_export_done(total, path, None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_export_done(self, total, path, err):
+        """导出结束（回到主线程）。err 为 None 表示成功。"""
+        if err is not None:
+            messagebox.showerror(APP_TITLE, "导出失败：{}".format(err))
+            self.var_status.set("导出失败：{}".format(err))
             return
-        self.var_status.set("已导出 {} 条 → {}".format(len(self.results), path))
+        self.var_status.set("已导出 {} 条 → {}".format(total, path))
 
 
     # ---- 结果列表右键菜单 / 复制 / 配置持久化 --------------------
