@@ -17,8 +17,9 @@ import queue
 import calendar
 import threading
 import subprocess
+import socket
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from datetime import datetime
 
 # ---- 资源路径（兼容 PyInstaller 单文件打包） ----
@@ -611,6 +612,126 @@ class StatsWorker(threading.Thread):
 
 
 # ---------------------------------------------------------------- 日历弹窗
+class TcpSession(threading.Thread):
+    """TCP 收发会话（客户端或服务端），网络操作全部在这个后台线程里。
+
+    收到的内容统一投到 out_q，由界面用 after 轮询取出 —— 和主程序里
+    搜索 / 统计同一套做法，子线程绝不直接碰 tkinter 控件。
+    """
+
+    def __init__(self, out_q, host="", port=0, as_server=False):
+        super().__init__(daemon=True)
+        self.out_q = out_q
+        self.host = host
+        self.port = port
+        self.as_server = as_server
+        self._stop = threading.Event()
+        self._sock = None            # 当前用于收发的连接
+        self._server = None          # 服务端的监听套接字
+        self._send_lock = threading.Lock()
+
+    def _emit(self, kind, payload=""):
+        self.out_q.put((kind, payload))
+
+    def run(self):
+        try:
+            if self.as_server:
+                self._serve()
+            else:
+                self._connect()
+        finally:
+            self._close_all()
+            self._emit("closed")
+
+    # ---- 客户端 ----
+    def _connect(self):
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=8)
+        except Exception as exc:
+            self._emit("err", "连接失败：{}".format(exc))
+            return
+        sock.settimeout(0.3)         # 短超时，便于及时响应 stop()
+        self._sock = sock
+        self._emit("sys", "已连接到 {}:{}".format(self.host, self.port))
+        self._recv_loop(sock)
+
+    # ---- 服务端 ----
+    def _serve(self):
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((self.host or "0.0.0.0", self.port))
+            srv.listen(1)
+        except Exception as exc:
+            self._emit("err", "监听失败：{}".format(exc))
+            return
+        srv.settimeout(0.3)
+        self._server = srv
+        self._emit("sys", "正在监听 {}:{}".format(self.host or "0.0.0.0", self.port))
+        while not self._stop.is_set():
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            except Exception as exc:
+                if not self._stop.is_set():
+                    self._emit("err", "接受连接失败：{}".format(exc))
+                return
+            conn.settimeout(0.3)
+            self._sock = conn
+            self._emit("sys", "客户端接入：{}:{}".format(addr[0], addr[1]))
+            self._recv_loop(conn)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._sock = None
+            if not self._stop.is_set():
+                self._emit("sys", "连接已断开，继续等待客户端接入")
+
+    def _recv_loop(self, sock):
+        while not self._stop.is_set():
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:
+                continue
+            except Exception as exc:
+                if not self._stop.is_set():
+                    self._emit("err", "接收出错：{}".format(exc))
+                return
+            if not data:
+                self._emit("sys", "对端关闭了连接")
+                return
+            self._emit("rx", data)    # 原始 bytes，怎么显示由界面决定
+
+    def send(self, data):
+        """发送数据。返回 None 表示成功，否则返回错误说明。"""
+        sock = self._sock
+        if sock is None:
+            return "还没有建立连接"
+        try:
+            with self._send_lock:
+                sock.sendall(data)
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    def stop(self):
+        self._stop.set()
+        # 主动关掉，让阻塞在 recv / accept 上的线程尽快醒来
+        self._close_all()
+
+    def _close_all(self):
+        for attr in ("_sock", "_server"):
+            s = getattr(self, attr, None)
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+
 class CalendarPopup:
     """无依赖的简易日历选择弹窗"""
 
@@ -799,6 +920,7 @@ class App:
         self.last_dir = None
         self._upgrading = False
         self._searching = False
+        self.tcp_commands = []     # TCP 调试的常用指令
         self.config = self._load_config()
 
         self._build_style()
@@ -948,6 +1070,14 @@ class App:
         m_tool.add_command(label="清空结果", command=self.clear_results,
                            accelerator="Ctrl+L")
         bar.add_cascade(label="工具", menu=m_tool)
+        # 工具箱：现场排查用的小工具，跟检索流程本身不耦合
+        m_box = tk.Menu(bar, tearoff=0)
+        m_box.add_command(label="TCP 调试工具", command=self._open_tcp_tool)
+        m_box.add_separator()
+        m_box.add_command(label="导出配置…（复制到其它机器）",
+                          command=self._export_settings)
+        m_box.add_command(label="导入配置…", command=self._import_settings)
+        bar.add_cascade(label="工具箱", menu=m_box)
         m_help = tk.Menu(bar, tearoff=0)
         m_help.add_command(label="升级源设置…", command=self._set_update_source)
         m_help.add_command(label="检查更新…", command=lambda: self._check_update(manual=True))
@@ -3025,6 +3155,540 @@ class App:
                 self.tree_res.item(iid, tags=tuple(tags))
             except Exception:
                 pass
+
+    def _open_tcp_tool(self):
+        """TCP 调试工具。
+
+        产线设备（扫码枪、终焊机、PLC）大多走 TCP，现场排查时要能直接连着
+        看原始报文。这里做个够用的收发端：客户端 / 服务端两种模式、文本或
+        HEX、定时发送、常用指令一键发；记录带毫秒时间戳，方便跟设备日志
+        对齐时间。窗口非模态，可以一边看日志一边收发。
+        """
+        win = make_dialog(self.root, "TCP 调试工具", 960, 680,
+                          resizable=True, modal=False)
+        out_q = queue.Queue()
+        # 运行时状态。装进 dict 是为了在闭包里改起来方便（不必给每个内部
+        # 函数都加 nonlocal）；值类型混杂，所以显式标注成 dict 避免误判。
+        session: dict = {"sess": None, "timer": None, "interval": 1000}
+        counters = {"rx": 0, "tx": 0}
+        font_s = ("Microsoft YaHei UI", 9)
+
+        cmds = self.tcp_commands           # 同一个列表对象，改动直接生效
+        if not cmds:
+            saved = (self.config or {}).get("tcp_commands")
+            if isinstance(saved, list):
+                cmds.extend(saved)
+
+        # ---- 顶部：模式 / 地址 / 端口 / 连接 ----
+        top = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                       highlightbackground=COLORS["border"])
+        top.pack(fill="x", padx=14, pady=(14, 8))
+        inner = tk.Frame(top, bg=COLORS["card"])
+        inner.pack(fill="x", padx=12, pady=10)
+        row1 = tk.Frame(inner, bg=COLORS["card"])
+        row1.pack(fill="x")
+        var_server = tk.BooleanVar(value=False)
+        ttk.Radiobutton(row1, text="客户端", value=False,
+                        variable=var_server).pack(side="left")
+        ttk.Radiobutton(row1, text="服务端（监听）", value=True,
+                        variable=var_server).pack(side="left", padx=(6, 14))
+        tk.Label(row1, text="地址", bg=COLORS["card"], fg=COLORS["text"],
+                 font=font_s).pack(side="left")
+        var_host = tk.StringVar(value="127.0.0.1")
+        ttk.Entry(row1, textvariable=var_host, width=18).pack(side="left",
+                                                              padx=(4, 10))
+        tk.Label(row1, text="端口", bg=COLORS["card"], fg=COLORS["text"],
+                 font=font_s).pack(side="left")
+        var_port = tk.StringVar(value="8080")
+        ttk.Entry(row1, textvariable=var_port, width=7).pack(side="left",
+                                                             padx=(4, 12))
+        btn_conn = ttk.Button(row1, text="连接", style="Primary.TButton",
+                              command=lambda: do_connect())
+        btn_conn.pack(side="left")
+        lbl_conn = tk.Label(row1, text="未连接", bg=COLORS["card"],
+                            fg=COLORS["muted"], font=font_s)
+        lbl_conn.pack(side="left", padx=(12, 0))
+
+        # ---- 收发记录 ----
+        box = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                       highlightbackground=COLORS["border"])
+        box.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        txt = tk.Text(box, wrap="word", font=("Consolas", 9), height=12,
+                      relief="flat", bg=COLORS["card"], fg=COLORS["text"],
+                      highlightthickness=0, padx=8, pady=6, state="disabled")
+        ysb = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ysb.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        txt.tag_configure("time", foreground="#9ca3af")
+        txt.tag_configure("rx", foreground="#0f766e")
+        txt.tag_configure("tx", foreground=COLORS["primary"])
+        txt.tag_configure("sys", foreground=COLORS["muted"])
+        txt.tag_configure("err", foreground=COLORS["danger"])
+
+        lbl_counts = tk.Label(win, text="收 0 字节 / 发 0 字节", bg=COLORS["bg"],
+                              fg=COLORS["muted"], font=font_s, anchor="w")
+        lbl_counts.pack(fill="x", padx=16)
+
+        # ---- 发送区 ----
+        send_card = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                             highlightbackground=COLORS["border"])
+        send_card.pack(fill="x", padx=14, pady=(6, 6))
+        send_in = tk.Frame(send_card, bg=COLORS["card"])
+        send_in.pack(fill="x", padx=12, pady=10)
+        row2 = tk.Frame(send_in, bg=COLORS["card"])
+        row2.pack(fill="x")
+        tk.Label(row2, text="发送", bg=COLORS["card"], fg=COLORS["text"],
+                 font=font_s).pack(side="left", padx=(0, 6))
+        var_send = tk.StringVar()
+        ent_send = ttk.Entry(row2, textvariable=var_send,
+                             font=("Consolas", 10))
+        ent_send.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(row2, text="发送", style="Primary.TButton",
+                   command=lambda: do_send()).pack(side="left")
+
+        row3 = tk.Frame(send_in, bg=COLORS["card"])
+        row3.pack(fill="x", pady=(8, 0))
+        var_hex = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row3, text="HEX", variable=var_hex).pack(side="left")
+        tk.Label(row3, text="换行", bg=COLORS["card"], fg=COLORS["muted"],
+                 font=font_s).pack(side="left", padx=(14, 4))
+        var_nl = tk.StringVar(value="无")
+        ttk.Combobox(row3, textvariable=var_nl, width=6, state="readonly",
+                     values=["无", "LF", "CRLF"]).pack(side="left")
+        btn_timer = ttk.Button(row3, text="定时发送", style="Ghost.TButton",
+                               command=lambda: toggle_timer())
+        btn_timer.pack(side="left", padx=(16, 6))
+        tk.Label(row3, text="间隔", bg=COLORS["card"], fg=COLORS["muted"],
+                 font=font_s).pack(side="left")
+        var_interval = tk.StringVar(value="1000")
+        ttk.Entry(row3, textvariable=var_interval, width=7).pack(side="left",
+                                                                 padx=(4, 4))
+        tk.Label(row3, text="毫秒", bg=COLORS["card"], fg=COLORS["muted"],
+                 font=font_s).pack(side="left")
+
+        # ---- 常用指令 ----
+        cmd_row = tk.Frame(win, bg=COLORS["bg"])
+        cmd_row.pack(fill="x", padx=14, pady=(0, 6))
+
+        # ---- 底部 ----
+        bar = tk.Frame(win, bg=COLORS["bg"])
+        bar.pack(fill="x", padx=14, pady=(0, 14))
+        ttk.Button(bar, text="清空记录", command=lambda: clear_log()).pack(side="left")
+        ttk.Button(bar, text="保存记录…", command=lambda: save_log()).pack(
+            side="left", padx=(8, 0))
+        ttk.Button(bar, text="关闭", command=lambda: on_close()).pack(side="right")
+
+        # ---------- 内部函数 ----------
+        def stamp():
+            t = time.time()
+            return time.strftime("%H:%M:%S", time.localtime(t)) + \
+                ".{:03d}".format(int(t * 1000) % 1000)
+
+        def fmt(data):
+            if var_hex.get():
+                return " ".join("{:02X}".format(b) for b in data)
+            return data.decode("utf-8", "replace").rstrip("\r\n")
+
+        def append(kind, text, with_time=True):
+            txt.configure(state="normal")
+            if with_time:
+                txt.insert("end", stamp() + "  ", "time")
+            txt.insert("end", text + "\n", kind)
+            txt.see("end")
+            txt.configure(state="disabled")
+
+        def update_counts():
+            lbl_counts.configure(text="收 {} 字节 / 发 {} 字节".format(
+                counters["rx"], counters["tx"]))
+
+        def clear_log():
+            txt.configure(state="normal")
+            txt.delete("1.0", "end")
+            txt.configure(state="disabled")
+            counters["rx"] = counters["tx"] = 0
+            update_counts()
+
+        def payload():
+            """把输入框内容按当前设置转成 bytes；返回 (data, 错误说明)。"""
+            s = var_send.get()
+            if var_hex.get():
+                raw = re.sub(r"[^0-9A-Fa-f]", "", s)
+                if len(raw) % 2:
+                    return None, "HEX 需要成对的十六进制字符（当前是奇数个）"
+                try:
+                    data = bytes.fromhex(raw)
+                except Exception as exc:
+                    return None, "HEX 解析失败：{}".format(exc)
+            else:
+                data = s.encode("utf-8")
+            nl = var_nl.get()
+            if nl == "CRLF":
+                data += b"\r\n"
+            elif nl == "LF":
+                data += b"\n"
+            return data, None
+
+        def do_send(manual=True):
+            sess = session["sess"]
+            if sess is None:
+                if manual:
+                    messagebox.showinfo(APP_TITLE, "请先连接或开始监听")
+                return False
+            data, err = payload()
+            if err:
+                if manual:
+                    messagebox.showwarning(APP_TITLE, err)
+                return False
+            if not data:
+                if manual:
+                    messagebox.showinfo(APP_TITLE, "发送内容为空")
+                return False
+            problem = sess.send(data)
+            if problem:
+                append("err", "发送失败：" + problem)
+                stop_timer()
+                return False
+            counters["tx"] += len(data)
+            update_counts()
+            append("tx", "→ " + fmt(data))
+            return True
+
+        def stop_timer():
+            if session["timer"] is not None:
+                try:
+                    win.after_cancel(session["timer"])
+                except Exception:
+                    pass
+                session["timer"] = None
+                btn_timer.configure(text="定时发送")
+                append("sys", "已停止定时发送")
+
+        def tick():
+            if session["timer"] is None:
+                return
+            if not do_send(manual=False):
+                stop_timer()
+                return
+            session["timer"] = win.after(session["interval"], tick)
+
+        def toggle_timer():
+            if session["timer"] is not None:
+                stop_timer()
+                return
+            try:
+                ms = int(var_interval.get().strip())
+            except ValueError:
+                messagebox.showwarning(APP_TITLE, "定时间隔要填毫秒数")
+                return
+            if ms < 50:
+                messagebox.showwarning(APP_TITLE, "定时间隔太短，最少 50 毫秒")
+                return
+            session["interval"] = ms
+            session["timer"] = win.after(ms, tick)
+            btn_timer.configure(text="停止定时")
+            append("sys", "开始定时发送：每 {} 毫秒一次".format(ms))
+
+        def on_closed():
+            """会话结束（对端断开、出错或主动断开）后恢复界面。"""
+            session["sess"] = None
+            stop_timer()
+            btn_conn.configure(text="连接")
+            lbl_conn.configure(text="未连接", fg=COLORS["muted"])
+
+        def do_connect():
+            if session["sess"] is not None:
+                sess = session["sess"]
+                session["sess"] = None
+                append("sys", "正在断开…")
+                sess.stop()
+                return
+            host = var_host.get().strip()
+            try:
+                port = int(var_port.get().strip())
+            except ValueError:
+                messagebox.showwarning(APP_TITLE, "端口要填数字")
+                return
+            if not host:
+                messagebox.showwarning(APP_TITLE, "请填写地址")
+                return
+            if not 1 <= port <= 65535:
+                messagebox.showwarning(APP_TITLE, "端口范围是 1 - 65535")
+                return
+            counters["rx"] = counters["tx"] = 0
+            update_counts()
+            sess = TcpSession(out_q, host, port, as_server=var_server.get())
+            session["sess"] = sess
+            btn_conn.configure(text="断开")
+            lbl_conn.configure(text="连接中…", fg=COLORS["primary"])
+            sess.start()
+
+        def save_log():
+            content = txt.get("1.0", "end").strip()
+            if not content:
+                messagebox.showinfo(APP_TITLE, "还没有收发记录")
+                return
+            path = filedialog.asksaveasfilename(
+                title="保存收发记录", defaultextension=".txt",
+                initialfile="TCP记录_{}.txt".format(time.strftime("%Y%m%d_%H%M%S")),
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    f.write(content + "\n")
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, "保存失败：\n{}".format(exc))
+                return
+            self.var_status.set("TCP 记录已保存：{}".format(path))
+
+        def save_cmds_cfg():
+            self.tcp_commands = cmds
+            self.config["tcp_commands"] = cmds
+            self._save_config()
+
+        def use_cmd(k):
+            item = cmds[k]
+            var_hex.set(bool(item.get("hex")))
+            var_nl.set(item.get("nl") or "无")
+            var_send.set(item.get("text") or "")
+            do_send()
+
+        def remove_cmd(k):
+            if 0 <= k < len(cmds):
+                name = cmds[k].get("name") or cmds[k].get("text") or "该指令"
+                if not messagebox.askyesno(APP_TITLE, "删除常用指令「{}」？".format(name)):
+                    return
+                cmds.pop(k)
+                save_cmds_cfg()
+                rebuild_cmds()
+
+        def cmd_menu(event, k):
+            m = tk.Menu(win, tearoff=0)
+            m.add_command(label="填入发送框",
+                          command=lambda: var_send.set(cmds[k].get("text") or ""))
+            m.add_command(label="删除该指令", command=lambda: remove_cmd(k))
+            m.tk_popup(event.x_root, event.y_root)   # Tk 会自己释放 grab
+
+        def add_cmd():
+            text = var_send.get()
+            if not text.strip():
+                messagebox.showinfo(APP_TITLE, "先在发送框里填好内容，再存为常用指令")
+                return
+            name = simpledialog.askstring(
+                "存为常用指令", "给这条指令起个名字：",
+                initialvalue=text.strip()[:12], parent=win)
+            if not name or not name.strip():
+                return
+            cmds.append({"name": name.strip(), "text": text,
+                         "hex": var_hex.get(), "nl": var_nl.get()})
+            save_cmds_cfg()
+            rebuild_cmds()
+
+        def rebuild_cmds():
+            for w in cmd_row.winfo_children():
+                w.destroy()
+            tk.Label(cmd_row, text="常用指令", bg=COLORS["bg"],
+                     fg=COLORS["muted"], font=font_s).pack(side="left", padx=(0, 6))
+            if not cmds:
+                tk.Label(cmd_row, text="（还没有，填好内容后点右边保存）",
+                         bg=COLORS["bg"], fg=COLORS["muted"], font=font_s).pack(
+                    side="left")
+            for k, item in enumerate(cmds):
+                b = ttk.Button(cmd_row, text=item.get("name") or "…",
+                               style="Ghost.TButton",
+                               command=lambda i=k: use_cmd(i))
+                b.pack(side="left", padx=(0, 6))
+                b.bind("<Button-3>", lambda e, i=k: cmd_menu(e, i))
+            ttk.Button(cmd_row, text="＋ 存为指令", style="Ghost.TButton",
+                       command=add_cmd).pack(side="left", padx=(6, 0))
+
+        def poll():
+            try:
+                while True:
+                    kind, data = out_q.get_nowait()
+                    if kind == "rx":
+                        counters["rx"] += len(data)
+                        update_counts()
+                        append("rx", "← " + fmt(data))
+                    elif kind == "sys":
+                        append("sys", "· " + data)
+                        if "已连接到" in data or "正在监听" in data:
+                            lbl_conn.configure(text="已连接" if "已连接" in data
+                                                    else "监听中", fg="#15803d")
+                        elif "客户端接入" in data:
+                            lbl_conn.configure(text="客户端已接入", fg="#15803d")
+                    elif kind == "err":
+                        append("err", "! " + data)
+                    elif kind == "closed":
+                        on_closed()
+            except queue.Empty:
+                pass
+            if win.winfo_exists():
+                win.after(80, poll)
+
+        def on_close():
+            sess = session["sess"]
+            session["sess"] = None
+            if sess is not None:
+                sess.stop()
+            stop_timer()
+            save_cmds_cfg()          # 随手把常用指令存下来
+            win.destroy()
+
+        def on_enter(_event):
+            do_send()
+            return "break"
+
+        # ---------- 收尾 ----------
+        ent_send.bind("<Return>", on_enter)
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        win.bind("<Escape>", lambda e: on_close())
+        rebuild_cmds()
+        append("sys", "填好地址端口后点「连接」；服务端模式会监听本机端口等待接入")
+        win.after(80, poll)
+
+    def _export_settings(self):
+        """把可移植的设置导出成一个文件，方便在其它产线机器上一键套用。
+
+        只导出跟机器无关的部分：升级源、异常关键词、结果上限。
+        上次打开的目录、搜索词这些是每台机器自己的，带过去只会添乱。
+        """
+        data: dict = {
+            "kind": "logparser-settings",
+            "format": 1,
+            "app_version": APP_VERSION,
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "update_manifests": list(getattr(self, "update_manifests", None) or []),
+            "error_patterns": list(getattr(self, "error_patterns", None)
+                                   or ERROR_PATTERNS),
+            "limit": self.var_limit.get(),
+        }
+        path = filedialog.asksaveasfilename(
+            title="导出配置", defaultextension=".json",
+            initialfile="LogParser配置_{}.json".format(time.strftime("%Y%m%d")),
+            filetypes=[("配置文件", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, "导出失败：\n{}".format(exc))
+            return
+        self.var_status.set("配置已导出：{}".format(path))
+        messagebox.showinfo(
+            APP_TITLE,
+            "配置已导出：\n{}\n\n"
+            "包含：\n"
+            "  · 升级源 {} 条\n"
+            "  · 异常判定关键词 {} 条\n"
+            "  · 结果上限 {}\n\n"
+            "在其它机器上用「工具箱 → 导入配置…」套用。".format(
+                path, len(data["update_manifests"]),
+                len(data["error_patterns"]), data["limit"] or "(默认)"))
+
+    def _import_settings(self):
+        """读取导出的配置文件，先把差异列清楚，确认后再应用。"""
+        path = filedialog.askopenfilename(
+            title="导入配置",
+            filetypes=[("配置文件", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, "读取失败：\n{}".format(exc))
+            return
+        if not isinstance(data, dict):
+            messagebox.showerror(APP_TITLE, "文件内容不是预期的配置格式")
+            return
+
+        new_sources = []
+        for x in (data.get("update_manifests") or []):
+            u = normalize_manifest(x)
+            if valid_manifest(u) and u not in new_sources:
+                new_sources.append(u)
+        new_pats = []
+        for x in (data.get("error_patterns") or []):
+            s = str(x).strip()
+            if s and s not in new_pats:
+                new_pats.append(s)
+        new_limit = str(data.get("limit") or "").strip()
+        if new_limit not in ("2000", "10000", "20000", "50000", "100000", "不限制"):
+            new_limit = ""
+
+        if not (new_sources or new_pats or new_limit):
+            messagebox.showwarning(APP_TITLE, "这个文件里没有可用的设置")
+            return
+
+        cur_sources = list(getattr(self, "update_manifests", None) or [])
+        cur_pats = list(getattr(self, "error_patterns", None) or [])
+
+        def block(title, cur, new):
+            lines = ["{}（当前 {} 项 → 导入 {} 项）".format(title, len(cur), len(new))]
+            for x in new:
+                lines.append("  {} {}".format("＋" if x not in cur else "　", x))
+            for x in cur:
+                if x not in new:
+                    lines.append("  － {}".format(x))
+            return "\n".join(lines)
+
+        parts = [block("升级源", cur_sources, new_sources)]
+        if new_pats:
+            parts.append(block("异常判定关键词", cur_pats, new_pats))
+        if new_limit:
+            parts.append("结果上限：{} → {}".format(self.var_limit.get(), new_limit))
+        parts.append("（只改上面这些，不会动你上次打开的目录等本机设置）")
+        detail = "\n\n".join(parts)
+
+        win = make_dialog(self.root, "导入配置", 780, 520, resizable=True)
+        tk.Label(win, text="将应用以下设置", bg=COLORS["bg"], fg=COLORS["text"],
+                 font=("Microsoft YaHei UI", 11, "bold")).pack(
+            anchor="w", padx=18, pady=(16, 2))
+        tk.Label(win, text="来源：" + path, bg=COLORS["bg"], fg=COLORS["muted"],
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=18)
+
+        box = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                       highlightbackground=COLORS["border"])
+        box.pack(fill="both", expand=True, padx=18, pady=(10, 6))
+        txt = tk.Text(box, font=("Consolas", 9), relief="flat", wrap="word",
+                      bg=COLORS["card"], fg=COLORS["text"],
+                      highlightthickness=0, padx=10, pady=8)
+        ysb = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ysb.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        txt.insert("1.0", detail)
+        txt.configure(state="disabled")
+
+        def apply_it():
+            if new_sources:
+                self.update_manifests = list(new_sources)
+                self.update_manifest = new_sources[0]
+            if new_pats:
+                self.error_patterns = list(new_pats)
+            if new_limit:
+                self.var_limit.set(new_limit)
+            self._save_config()
+            self._recolor_results()      # 异常关键词变了，结果里的标红要重刷
+            win.destroy()
+            self.var_status.set("配置已导入：升级源 {} 条 / 异常关键词 {} 条".format(
+                len(new_sources), len(new_pats)))
+
+        bar = tk.Frame(win, bg=COLORS["bg"])
+        bar.pack(fill="x", padx=18, pady=(0, 16))
+        ttk.Button(bar, text="取消", command=win.destroy).pack(side="right",
+                                                              padx=(8, 0))
+        ttk.Button(bar, text="应用", style="Primary.TButton",
+                   command=apply_it).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def _set_error_keywords(self):
         """编辑异常判定关键词：命中任一即视为异常行（标红 + 计入统计）。"""
