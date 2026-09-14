@@ -295,6 +295,10 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 # 树节点图标
 NODE_ICONS = {"device": "📁", "module": "📂", "file": "📄"}
 
+# TCP 调试工具的显示上限
+TCP_MAX_LINES = 2000        # 收发记录最多保留的行数
+TCP_MAX_DISPLAY = 4000      # 单条报文最多显示的字符数
+
 # ---- 设计令牌 ----
 COLORS = {
     "bg":            "#f6f7fb",   # 应用背景
@@ -3172,12 +3176,17 @@ class App:
         session: dict = {"sess": None, "timer": None, "interval": 1000}
         counters = {"rx": 0, "tx": 0}
         font_s = ("Microsoft YaHei UI", 9)
+        MAX_LINES = TCP_MAX_LINES          # 收发记录最多留这么多行
+        MAX_DISPLAY = TCP_MAX_DISPLAY      # 单条最多显示这么多字符
 
         cmds = self.tcp_commands           # 同一个列表对象，改动直接生效
         if not cmds:
             saved = (self.config or {}).get("tcp_commands")
             if isinstance(saved, list):
                 cmds.extend(saved)
+
+        # 上次用的连接参数：现场就那么固定的几个地址端口，每次重输太折腾
+        tcp_cfg = (self.config or {}).get("tcp") or {}
 
         # ---- 顶部：模式 / 地址 / 端口 / 连接 ----
         top = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
@@ -3187,21 +3196,25 @@ class App:
         inner.pack(fill="x", padx=12, pady=10)
         row1 = tk.Frame(inner, bg=COLORS["card"])
         row1.pack(fill="x")
-        var_server = tk.BooleanVar(value=False)
-        ttk.Radiobutton(row1, text="客户端", value=False,
-                        variable=var_server).pack(side="left")
+        var_server = tk.BooleanVar(value=bool(tcp_cfg.get("server")))
+        ttk.Radiobutton(row1, text="客户端", value=False, variable=var_server,
+                        command=lambda: on_mode_change()).pack(side="left")
         ttk.Radiobutton(row1, text="服务端（监听）", value=True,
-                        variable=var_server).pack(side="left", padx=(6, 14))
+                        variable=var_server,
+                        command=lambda: on_mode_change()).pack(side="left",
+                                                               padx=(6, 14))
         tk.Label(row1, text="地址", bg=COLORS["card"], fg=COLORS["text"],
                  font=font_s).pack(side="left")
-        var_host = tk.StringVar(value="127.0.0.1")
-        ttk.Entry(row1, textvariable=var_host, width=18).pack(side="left",
-                                                              padx=(4, 10))
+        var_host = tk.StringVar(
+            value=tcp_cfg.get("host")
+            or ("0.0.0.0" if var_server.get() else "127.0.0.1"))
+        ent_host = ttk.Entry(row1, textvariable=var_host, width=18)
+        ent_host.pack(side="left", padx=(4, 10))
         tk.Label(row1, text="端口", bg=COLORS["card"], fg=COLORS["text"],
                  font=font_s).pack(side="left")
-        var_port = tk.StringVar(value="8080")
-        ttk.Entry(row1, textvariable=var_port, width=7).pack(side="left",
-                                                             padx=(4, 12))
+        var_port = tk.StringVar(value=str(tcp_cfg.get("port") or "8080"))
+        ent_port = ttk.Entry(row1, textvariable=var_port, width=7)
+        ent_port.pack(side="left", padx=(4, 12))
         btn_conn = ttk.Button(row1, text="连接", style="Primary.TButton",
                               command=lambda: do_connect())
         btn_conn.pack(side="left")
@@ -3228,9 +3241,16 @@ class App:
         txt.tag_configure("sys", foreground=COLORS["muted"])
         txt.tag_configure("err", foreground=COLORS["danger"])
 
-        lbl_counts = tk.Label(win, text="收 0 字节 / 发 0 字节", bg=COLORS["bg"],
-                              fg=COLORS["muted"], font=font_s, anchor="w")
-        lbl_counts.pack(fill="x", padx=16)
+        info_row = tk.Frame(win, bg=COLORS["bg"])
+        info_row.pack(fill="x", padx=16)
+        lbl_counts = tk.Label(info_row, text="收 0 字节 / 发 0 字节",
+                              bg=COLORS["bg"], fg=COLORS["muted"],
+                              font=font_s, anchor="w")
+        lbl_counts.pack(side="left")
+        # 数据一直来的话，想停下来看某一条就会被新内容顶走，给个开关
+        var_follow = tk.BooleanVar(value=True)
+        ttk.Checkbutton(info_row, text="自动滚动", variable=var_follow).pack(
+            side="right")
 
         # ---- 发送区 ----
         send_card = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
@@ -3251,11 +3271,13 @@ class App:
 
         row3 = tk.Frame(send_in, bg=COLORS["card"])
         row3.pack(fill="x", pady=(8, 0))
-        var_hex = tk.BooleanVar(value=False)
+        var_hex = tk.BooleanVar(value=bool(tcp_cfg.get("hex")))
         ttk.Checkbutton(row3, text="HEX", variable=var_hex).pack(side="left")
         tk.Label(row3, text="换行", bg=COLORS["card"], fg=COLORS["muted"],
                  font=font_s).pack(side="left", padx=(14, 4))
-        var_nl = tk.StringVar(value="无")
+        saved_nl = tcp_cfg.get("nl")
+        var_nl = tk.StringVar(value=saved_nl if saved_nl in ("无", "LF", "CRLF")
+                              else "无")
         ttk.Combobox(row3, textvariable=var_nl, width=6, state="readonly",
                      values=["无", "LF", "CRLF"]).pack(side="left")
         btn_timer = ttk.Button(row3, text="定时发送", style="Ghost.TButton",
@@ -3263,7 +3285,7 @@ class App:
         btn_timer.pack(side="left", padx=(16, 6))
         tk.Label(row3, text="间隔", bg=COLORS["card"], fg=COLORS["muted"],
                  font=font_s).pack(side="left")
-        var_interval = tk.StringVar(value="1000")
+        var_interval = tk.StringVar(value=str(tcp_cfg.get("interval") or "1000"))
         ttk.Entry(row3, textvariable=var_interval, width=7).pack(side="left",
                                                                  padx=(4, 4))
         tk.Label(row3, text="毫秒", bg=COLORS["card"], fg=COLORS["muted"],
@@ -3288,16 +3310,32 @@ class App:
                 ".{:03d}".format(int(t * 1000) % 1000)
 
         def fmt(data):
+            """把字节转成可读文本。超长报文只显示开头 —— 设备偶尔会一口气
+            吐出很大的内容，原样塞进文本框能把界面卡住。"""
             if var_hex.get():
-                return " ".join("{:02X}".format(b) for b in data)
-            return data.decode("utf-8", "replace").rstrip("\r\n")
+                s = " ".join("{:02X}".format(b) for b in data)
+            else:
+                s = data.decode("utf-8", "replace").rstrip("\r\n")
+            if len(s) > MAX_DISPLAY:
+                s = s[:MAX_DISPLAY] + "  …（共 {} 字节，已截断显示）".format(
+                    len(data))
+            return s
 
         def append(kind, text, with_time=True):
             txt.configure(state="normal")
             if with_time:
                 txt.insert("end", stamp() + "  ", "time")
             txt.insert("end", text + "\n", kind)
-            txt.see("end")
+            # 定时发送开一整晚能攒下几十万行，界面会越来越卡，超过上限
+            # 就把最早的行丢掉
+            try:
+                lines = int(txt.index("end-1c").split(".")[0])
+                if lines > MAX_LINES:
+                    txt.delete("1.0", "{}.0".format(lines - MAX_LINES + 1))
+            except Exception:
+                pass
+            if var_follow.get():
+                txt.see("end")
             txt.configure(state="disabled")
 
         def update_counts():
@@ -3449,6 +3487,32 @@ class App:
             self.config["tcp_commands"] = cmds
             self._save_config()
 
+        def save_tcp_cfg():
+            """记住连接参数，下次打开直接带出来。"""
+            self.config["tcp"] = {
+                "server": bool(var_server.get()),
+                "host": var_host.get().strip(),
+                "port": var_port.get().strip(),
+                "hex": bool(var_hex.get()),
+                "nl": var_nl.get(),
+                "interval": var_interval.get().strip(),
+            }
+            self._save_config()
+
+        def on_mode_change():
+            """切换模式时把地址调成合适的默认值。
+
+            服务端若还留着 127.0.0.1，别的机器根本连不上，而界面上看不出
+            哪里不对。只在地址还是「另一种模式的默认值」时才顺手改掉，
+            用户自己填过的地址不动。
+            """
+            cur = var_host.get().strip()
+            if var_server.get():
+                if cur in ("", "127.0.0.1", "localhost"):
+                    var_host.set("0.0.0.0")
+            elif cur in ("", "0.0.0.0"):
+                var_host.set("127.0.0.1")
+
         def use_cmd(k):
             item = cmds[k]
             var_hex.set(bool(item.get("hex")))
@@ -3518,6 +3582,12 @@ class App:
                         if "已连接到" in data or "正在监听" in data:
                             lbl_conn.configure(text="已连接" if "已连接" in data
                                                     else "监听中", fg="#15803d")
+                        elif "继续等待" in data:
+                            # 服务端：客户端走了但还在监听。这条必须排在
+                            # 「客户端接入」前面 ——「继续等待客户端接入」里
+                            # 也含那四个字，顺序反了就被吃掉，标签会一直停在
+                            # 「已接入」，看起来像还连着
+                            lbl_conn.configure(text="监听中", fg="#15803d")
                         elif "客户端接入" in data:
                             lbl_conn.configure(text="客户端已接入", fg="#15803d")
                     elif kind == "err":
@@ -3535,7 +3605,8 @@ class App:
             if sess is not None:
                 sess.stop()
             stop_timer()
-            save_cmds_cfg()          # 随手把常用指令存下来
+            save_cmds_cfg()          # 常用指令和连接参数都顺手存下来
+            save_tcp_cfg()
             win.destroy()
 
         def on_enter(_event):
@@ -3544,10 +3615,15 @@ class App:
 
         # ---------- 收尾 ----------
         ent_send.bind("<Return>", on_enter)
+        # 地址 / 端口上回车直接连，省得再去够按钮
+        ent_host.bind("<Return>", lambda e: do_connect())
+        ent_port.bind("<Return>", lambda e: do_connect())
         win.protocol("WM_DELETE_WINDOW", on_close)
-        win.bind("<Escape>", lambda e: on_close())
+        # 故意不绑 Escape：这是个工具窗口，不是确认框。输入到一半误按就把
+        # 整个窗口关掉太伤了，要关请点「关闭」
         rebuild_cmds()
-        append("sys", "填好地址端口后点「连接」；服务端模式会监听本机端口等待接入")
+        append("sys", "选好模式、填好地址端口后点「连接」")
+        append("sys", "服务端模式下别的机器来连时，地址填 0.0.0.0（监听所有网卡）")
         win.after(80, poll)
 
     def _export_settings(self):
