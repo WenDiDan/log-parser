@@ -3,22 +3,29 @@
 dist exe 文件版本   = 1.0.17.0
 
 -- exe_version_problem --
-对当前清单 v1.0.17 : None
-对 exe 自身 v1.0.17.0: None
-清单为空        : None
-文件不存在      : None
+一致(当前清单)     : None   <- 期望 None
+一致(exe 四段自身) : None   <- 期望 None
+不一致(清单 9.9.9) : '打包产物是 v1.0.17，清单是 v9.9.9'   <- 期望返回问题描述
+清单为空           : None   <- 期望 None
+文件不存在         : None   <- 期望 None
 
 -- git --
-git_available   = True
-git_is_repo     = True
-git_user_name   = ''
-git_has_tag(v1.0.17) = False
-git_changes     = 3 项
+git_available        = True
+git_is_repo          = True
+git_identity         = ('WenDiDan', '231705148+WenDiDan@users.noreply.github.com')   <- 无配置时应回退到最近提交作者
+git_has_tag(v1.0.17)   = False
+git_changes          = 4 项
       M ReleaseTool.py
        M publish_local.py
       ?? _t_tool.py
-HEAD            = ea36a99 fix(ui): the detail window button bar was pushed out of the window
-分支            = ## main...origin/main [ahead 5]
+      ?? _t_tool_out.txt
+HEAD                 = ea36a99 fix(ui): the detail window button bar was pushed out of the window
+分支                 = ## main...origin/main [ahead 5]
 
--- 步骤标题 --
+-- publish_local：exe v1.0.17.0 vs 清单 v9.9.9 --
+退出码 = 0   <- 期望 1
+临时目录被创建 = False   <- 期望 False
+
+version.json 已还原 = True (version=1.0.17)
+
 STEP_NAMES = ['1 发布前检查', '2 打包', '3 发布', '4 发布后自检']
