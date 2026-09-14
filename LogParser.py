@@ -1868,6 +1868,24 @@ class App:
             txt.tag_add("err", "1.0", "end")
         txt.configure(state="disabled")
 
+        # 视图复位到左上角：insert 光标停在末尾，Tk 会把视图一并带下去，
+        # 于是每次打开详情都停在最下方、得先往上拖才看得见开头的「字段」。
+        # 窗口布局是稍后才定下来的，所以立刻复位一次、布局完成后再补一次。
+        def _reset_view():
+            try:
+                txt.see("1.0")
+                txt.yview_moveto(0)
+                info.see("1.0")
+                info.yview_moveto(0)
+            except Exception:
+                pass
+
+        _reset_view()
+        try:
+            win.after(60, _reset_view)
+        except Exception:
+            pass
+
         # 上下文区（默认折叠）：这条日志前后发生了什么
         CONTEXT_SPAN = 20
         ctx_holder = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
