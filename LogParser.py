@@ -81,7 +81,7 @@ except Exception:
     pass
 
 APP_TITLE = "设备日志解析器"
-APP_VERSION = "1.0.17"           # 当前版本号（与 version.txt / version.json 保持一致）
+APP_VERSION = "1.0.18"           # 当前版本号（与 version.txt / version.json 保持一致）
 
 # 远程升级：更新清单地址（version.json）。
 # 支持两种形式，二选一改为你的实际地址即可：
