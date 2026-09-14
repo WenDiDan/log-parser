@@ -1125,6 +1125,11 @@ class App:
         self.tree_res.tag_configure("err", foreground=COLORS["danger"], background=COLORS["danger_bg"])
         self.tree_res.bind("<Double-1>", self._show_detail)
         self.tree_res.bind("<Button-3>", self._on_res_right_click)
+        # 悬停浮层：列表列宽放不下长日志时，不用双击也能看全该行
+        self.tree_res.bind("<Motion>", self._on_res_hover)
+        self.tree_res.bind("<Leave>", lambda e: self._hide_tip())
+        self.tree_res.bind("<MouseWheel>", lambda e: self._hide_tip())
+        self.tree_res.bind("<Button-1>", lambda e: self._hide_tip(), add="+")
 
         self.empty_frame = ttk.Frame(right_card, style="Card.TFrame")
         self.empty_frame.place(relx=0.5, rely=0.55, anchor="center")
@@ -2163,6 +2168,64 @@ class App:
 
 
     # ---- 结果列表右键菜单 / 复制 / 配置持久化 --------------------
+    # ---- 结果行悬浮提示 ---------------------------------------------
+    def _on_res_hover(self, event):
+        """鼠标停在结果行上时，用浮层显示该行完整内容。
+
+        列表的「内容」列宽度有限，长日志会被裁掉，以前只能双击开详情才
+        看得全；悬停即可看，适合在几千条结果里快速扫读。
+        """
+        iid = self.tree_res.identify_row(event.y)
+        if not iid:
+            self._hide_tip()
+            return
+        if iid == getattr(self, "_tip_iid", None):
+            return                       # 同一行内移动，不必重建浮层
+        try:
+            idx = int(iid)
+        except (TypeError, ValueError):
+            return
+        if not (0 <= idx < len(self.results)):
+            return
+        ts, mod, fname, text, path, lineno = self.results[idx]
+        body = str(text or "")
+        if len(body) > 1500:
+            body = body[:1500] + "\n…（内容较长，双击查看完整）"
+        head = "{}   |   {}:{}".format(ts or "—", fname, lineno)
+        self._show_tip(head + "\n\n" + body, event.x_root, event.y_root, iid)
+
+    def _show_tip(self, text, x, y, iid):
+        self._hide_tip()
+        try:
+            tip = tk.Toplevel(self.root)
+            tip.wm_overrideredirect(True)          # 无边框，像个浮层
+            tip.configure(bg=COLORS["border"])
+            tk.Label(tip, text=text, justify="left", anchor="w",
+                     bg="#fffbe6", fg=COLORS["text"],
+                     font=("Microsoft YaHei UI", 9),
+                     padx=10, pady=8, wraplength=640).pack(padx=1, pady=1)
+            # 贴着鼠标右下角显示；靠边时向内收一点，别跑到屏幕外
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            px = min(x + 16, max(0, sw - 320))
+            py = min(y + 20, max(0, sh - 200))
+            tip.wm_geometry("+{}+{}".format(px, py))
+            self._tip = tip
+            self._tip_iid = iid
+        except Exception:
+            self._tip = None
+            self._tip_iid = None
+
+    def _hide_tip(self):
+        tip = getattr(self, "_tip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+        self._tip = None
+        self._tip_iid = None
+
     def _on_res_right_click(self, event):
         iid = self.tree_res.identify_row(event.y)
         if not iid:
