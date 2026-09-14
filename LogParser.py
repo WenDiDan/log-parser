@@ -3213,15 +3213,21 @@ class App:
         """
         win = make_dialog(self.root, "TCP 调试工具", 1000, 680,
                           resizable=True, modal=False)
-        # 「断开」和「连接」共用同一个按钮位置，用红色区分开更醒目
+        # 「断开」和「连接」共用同一个按钮位置，用红色区分开更醒目。
+        # 几何参数（字体 / padding）必须从 Primary.TButton 抄过来 —— 只要
+        # 差一点，两个状态下按钮的尺寸就会跳一下。
         try:
             st_tcp = ttk.Style(win)
-            st_tcp.configure("TcpStop.TButton",
-                             font=("Microsoft YaHei UI", 9, "bold"),
-                             padding=(14, 6), background=COLORS["danger"],
-                             foreground="#ffffff", borderwidth=0)
+            st_tcp.configure(
+                "TcpStop.TButton",
+                padding=st_tcp.lookup("Primary.TButton", "padding") or (16, 7),
+                font=st_tcp.lookup("Primary.TButton", "font")
+                     or ("Microsoft YaHei UI", 10, "bold"),
+                background=COLORS["danger"], foreground="white",
+                bordercolor=COLORS["danger"], borderwidth=0, relief="flat")
             st_tcp.map("TcpStop.TButton",
                        background=[("active", "#991b1b"),
+                                   ("pressed", "#991b1b"),
                                    ("disabled", "#e3b6b6")],
                        foreground=[("disabled", "#f8eaea")])
         except Exception:
@@ -3275,8 +3281,10 @@ class App:
         var_port = tk.StringVar(value=str(tcp_cfg.get("port") or "8080"))
         ent_port = ttk.Entry(row1, textvariable=var_port, width=7)
         ent_port.pack(side="left", padx=(4, 12))
+        # 固定宽度，配合下面把两种样式的字体 / padding 对齐，
+        # 保证「连接」和「断开」两个状态下按钮尺寸完全一致
         btn_conn = ttk.Button(row1, text="连接", style="Primary.TButton",
-                              command=lambda: do_connect())
+                              width=8, command=lambda: do_connect())
         btn_conn.pack(side="left")
         # 连接状态原先跟在按钮后面，但这一行控件排得太满（模式 + 地址下拉 +
         # 端口 + 宽的主色按钮），窗口稍窄或系统缩放偏大时它就被右边缘裁掉，
