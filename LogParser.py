@@ -683,6 +683,14 @@ class TcpSession(threading.Thread):
     def _connect(self):
         try:
             sock = socket.create_connection((self.host, self.port), timeout=8)
+        except socket.timeout:
+            self._emit("err", "连接超时：{}:{} 8 秒内没有响应 —— 确认设备在线、"
+                              "地址和端口填对".format(self.host, self.port))
+            return
+        except ConnectionRefusedError:
+            self._emit("err", "连接被拒绝：{}:{} 上没有程序在监听这个端口".format(
+                self.host, self.port))
+            return
         except Exception as exc:
             self._emit("err", "连接失败：{}".format(exc))
             return
@@ -700,6 +708,9 @@ class TcpSession(threading.Thread):
             srv.listen(1)
         except Exception as exc:
             self._emit("err", "监听失败：{}".format(exc))
+            # bind 失败的原始错误码很难看懂，把最常见的两种原因点出来
+            self._emit("sys", "提示：服务端只能监听本机网卡或 0.0.0.0；"
+                              "端口被占用时换一个")
             return
         srv.settimeout(0.3)
         self._server = srv
@@ -3502,19 +3513,23 @@ class App:
 
         def on_closed():
             """会话结束（对端断开、出错或主动断开）后恢复界面。"""
+            was = session["sess"]
             session["sess"] = None
             stop_timer()
             set_locked(False)
             btn_conn.configure(text="连接")
             lbl_conn.configure(text="未连接", fg=COLORS["muted"])
+            # 主动断开时这里会走到两次（do_connect 里直接调一次、closed 事件
+            # 回来再一次），只在真有会话结束时记一笔，免得刷两条「已断开」
+            if was is not None:
+                append("sys", "已断开")
 
         def do_connect():
             if session["sess"] is not None:
                 sess = session["sess"]
-                session["sess"] = None
                 append("sys", "正在断开…")
                 sess.stop()
-                on_closed()          # 立刻解锁，不必等 closed 事件绕回来
+                on_closed()          # 立刻解锁收尾，不等 closed 事件绕回来
                 return
             host = var_host.get().strip()
             try:
@@ -3528,6 +3543,21 @@ class App:
             if not 1 <= port <= 65535:
                 messagebox.showwarning(APP_TITLE, "端口范围是 1 - 65535")
                 return
+            if var_server.get():
+                # 服务端只能绑定本机自己的地址，填了别人的会直接 bind 失败
+                # （WinError 10049，字面上完全看不出原因）。与其让人反复点
+                # 连接去试，不如点下去就把话说明白。
+                local = local_ipv4_addresses()
+                if host not in local and host != "0.0.0.0":
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        "服务端只能监听本机自己的地址。\n\n"
+                        "当前填的是：{}\n\n"
+                        "本机可用地址：\n  {}\n\n"
+                        "· 要让别的机器连进来 → 填 0.0.0.0\n"
+                        "· 只在本机自测     → 填 127.0.0.1".format(
+                            host, "\n  ".join(local)))
+                    return
             counters["rx"] = counters["tx"] = 0
             update_counts()
             sess = TcpSession(out_q, host, port, as_server=var_server.get())
