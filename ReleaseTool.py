@@ -159,15 +159,36 @@ def find_build_python():
     return ""
 
 
+def _py_works(path):
+    """确认解释器真的会执行代码。
+
+    有些环境里子进程启动后什么都不做却返回 0（例如直接用安装目录深处的
+    裸解释器，或系统里的占位程序）——用它跑的发布脚本会「成功」但其实
+    一行都没执行。这里让子进程以退出码 7 结束，只有真执行了才会得到 7。
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        p = subprocess.run([path, "-c", "import sys; sys.exit(7)"],
+                           capture_output=True, timeout=30,
+                           creationflags=CREATE_NO_WINDOW)
+        return p.returncode == 7
+    except Exception:
+        return False
+
+
 def pick_pub_python(build_py):
-    """发布类脚本只需标准库，优先选一个真实 python.exe（避开 pythonw）。"""
+    """挑一个「真的会执行」的解释器来跑发布脚本（只需标准库，避开 pythonw）。
+
+    不能用「文件存在」当判据，原因见 _py_works。
+    """
     cands = [build_py,
              os.path.join(os.path.dirname(sys.executable), "python.exe"),
              sys.executable]
     for c in cands:
-        if c and os.path.isfile(c):
+        if _py_works(c):
             return c
-    return sys.executable
+    return ""
 
 
 class Worker(threading.Thread):
@@ -261,7 +282,7 @@ class ReleaseTool:
         self.worker = None
         self.busy = False
         self.py_build = ""
-        self.py_pub = sys.executable
+        self.py_pub = ""        # 检测完成后才赋值，不回退到不干活的解释器
         self.ver = read_app_version()
         self.cfg = load_tool_config()
 
@@ -528,17 +549,26 @@ class ReleaseTool:
     # ---------- Python 探测 ----------
     def _detect_python_async(self):
         def work():
-            path = find_build_python()
-            self.root.after(0, lambda: self._on_python_found(path))
+            build = find_build_python()
+            pub = pick_pub_python(build)
+            self.root.after(0, lambda: self._on_python_found(build, pub))
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_python_found(self, path):
-        self.py_build = path
-        self.py_pub = pick_pub_python(path)
-        if path:
-            show = path if len(path) <= 52 else "..." + path[-49:]
+    def _on_python_found(self, build, pub):
+        self.py_build = build
+        self.py_pub = pub
+        if not pub:
+            # 绝不能再回退到 sys.executable：在这个环境里它启动的子进程会
+            # 静默返回 0，发布会显示「成功」但其实什么都没做。
+            self.lbl_env.configure(text="发布 Python: 未找到可用解释器", fg=BAD_C)
+            self._append("!! 没找到能真正执行脚本的 Python 解释器，"
+                         "检查 / 发布 / 自检均不可用（打包同样不可用）")
+            return
+        self._append("发布用解释器: " + pub)
+        if build:
+            show = build if len(build) <= 52 else "..." + build[-49:]
             self.lbl_env.configure(text="构建 Python: " + show, fg=MUTED)
-            self._append("构建环境: " + path)
+            self._append("构建环境: " + build)
         else:
             self.lbl_env.configure(text="构建 Python: 未找到（打包不可用）", fg=BAD_C)
             self._append("!! 未找到满足 tkinter + matplotlib + PyInstaller 的解释器，"
@@ -551,7 +581,11 @@ class ReleaseTool:
         -u 关闭 stdout 缓冲：子进程的 stdout 接到管道时默认是块缓冲，
         像 publish_gitee.py 这种要跑几十秒的脚本，输出会一直积压到进程
         结束才一次性刷出，界面上看起来就像卡死了。
+
+        这里不再回退到 sys.executable，原因见 _on_python_found。
         """
+        if not self.py_pub:
+            raise RuntimeError("没有可用的 Python 解释器（环境检测未完成或失败）")
         return [self.py_pub, "-u", os.path.join(HERE, script)] + list(args)
 
     def _step_check(self):
@@ -787,6 +821,12 @@ class ReleaseTool:
     # ---------- 事件 ----------
     def _start(self, steps, active=None):
         if self.busy:
+            return
+        if not self.py_pub:
+            messagebox.showwarning(
+                "环境未就绪",
+                "还没找到能真正执行脚本的 Python 解释器，无法开始。\n\n"
+                "环境检测在后台进行，请稍候重试；若一直如此请检查 Python 安装。")
             return
         self.save_cfg()
         self.busy = True
