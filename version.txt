@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 16, 0),
-    prodvers=(1, 0, 16, 0),
+    filevers=(1, 0, 17, 0),
+    prodvers=(1, 0, 17, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Di'),
             StringStruct(u'FileDescription', u'Device Log Analysis Tool'),
-            StringStruct(u'FileVersion', u'1.0.16'),
+            StringStruct(u'FileVersion', u'1.0.17'),
             StringStruct(u'InternalName', u'LogParser'),
             StringStruct(u'LegalCopyright', u'Copyright (C) 2026'),
             StringStruct(u'OriginalFilename', u'LogParser.exe'),
             StringStruct(u'ProductName', u'Equipment Log Parser'),
-            StringStruct(u'ProductVersion', u'1.0.16')
+            StringStruct(u'ProductVersion', u'1.0.17')
           ]
         )
       ]
