@@ -931,6 +931,13 @@ class App:
         m_tool.add_command(label="统计", command=self.show_stats)
         m_tool.add_command(label="异常判定关键词…",
                            command=self._set_error_keywords)
+        m_tool.add_separator()
+        m_tool.add_command(label="开始搜索", command=self.start_search,
+                           accelerator="F5")
+        m_tool.add_command(label="定位到结果筛选框",
+                           command=self._focus_res_filter, accelerator="Ctrl+F")
+        m_tool.add_command(label="清空结果", command=self.clear_results,
+                           accelerator="Ctrl+L")
         bar.add_cascade(label="工具", menu=m_tool)
         m_help = tk.Menu(bar, tearoff=0)
         m_help.add_command(label="升级源设置…", command=self._set_update_source)
@@ -939,6 +946,13 @@ class App:
         bar.add_cascade(label="帮助", menu=m_help)
         self.root.config(menu=bar)
         self.root.bind("<Control-o>", lambda e: self.open_dir())
+        # 常用快捷键（菜单里也标了，方便发现）
+        self.root.bind("<F5>", lambda e: self.start_search())
+        self.root.bind("<Control-Return>", lambda e: self.start_search())
+        self.root.bind("<Control-f>", lambda e: self._focus_res_filter())
+        self.root.bind("<Escape>", lambda e: self._cancel_search())
+        self.root.bind("<Control-l>", lambda e: self.clear_results())
+        self.root.bind("<Control-e>", lambda e: self.export("csv"))
 
     def _build_toolbar(self):
         # 顶部一条主色细条
@@ -1076,7 +1090,9 @@ class App:
         # 结果二次筛选：搜出几千条后可就地缩小范围；只隐藏不匹配的行，
         # 原始结果与导出内容都不受影响
         self.var_res_filter = tk.StringVar()
-        ttk.Entry(head, textvariable=self.var_res_filter, width=24).pack(side="right")
+        self.ent_res_filter = ttk.Entry(head, textvariable=self.var_res_filter,
+                                        width=24)
+        self.ent_res_filter.pack(side="right")
         ttk.Button(head, text="清除", style="Ghost.TButton",
                    command=lambda: self.var_res_filter.set("")).pack(
             side="right", padx=(6, 4))
@@ -1599,6 +1615,15 @@ class App:
         if not silent:
             self.var_status.set("已清空")
 
+    def _focus_res_filter(self):
+        """把焦点移到「结果中筛选」输入框并全选当前内容（Ctrl+F）。"""
+        try:
+            self.ent_res_filter.focus_set()
+            self.ent_res_filter.select_range(0, "end")
+            self.ent_res_filter.icursor("end")
+        except Exception:
+            pass
+
     def _filter_results(self):
         """结果二次筛选：只隐藏不匹配的行，self.results 一条都不动。
 
@@ -1711,8 +1736,11 @@ class App:
             return
         ts, mod, fname, text, path, lineno = self.results[idx]
         # 非模态：可以同时开好几个详情对照着看
-        win = make_dialog(self.root, "详情 - {} {}".format(mod, ts),
-                          920, 660, resizable=True, modal=False)
+        win = make_dialog(
+            self.root,
+            "详情 - {} {}    （第 {} / {} 条）".format(
+                mod, ts, idx + 1, len(self.results)),
+            920, 660, resizable=True, modal=False)
 
         # 顶部信息卡
         info_card = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
@@ -1843,9 +1871,33 @@ class App:
         ttk.Button(bar, text="打开原文件", style="Ghost.TButton",
                    command=lambda: self._open_original(path)).pack(
             side="left", padx=(8, 0))
+
+        # 上一条 / 下一条：顺着结果往下看，不必关窗口回列表再双击
+        hidden = getattr(self, "_hidden_iids", set())
+
+        def _go(delta):
+            nxt = idx + delta
+            # 跳过被「结果中筛选」隐藏掉的行，翻页只在看得见的行之间走
+            while 0 <= nxt < len(self.results):
+                if str(nxt) not in hidden:
+                    break
+                nxt += delta
+            else:
+                return
+            win.destroy()
+            self.tree_res.selection_set(str(nxt))
+            self.tree_res.see(str(nxt))
+            self._show_detail(None)
+
+        ttk.Button(bar, text="下一条 ▶",
+                   command=lambda: _go(1)).pack(side="right", padx=(8, 0))
+        ttk.Button(bar, text="◀ 上一条", style="Ghost.TButton",
+                   command=lambda: _go(-1)).pack(side="right")
         ttk.Button(bar, text="关闭", style="Primary.TButton",
-                   command=win.destroy).pack(side="right")
+                   command=win.destroy).pack(side="right", padx=(0, 8))
         win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Right>", lambda e: _go(1))
+        win.bind("<Left>", lambda e: _go(-1))
 
     def show_stats(self):
         sel = self._collect_selected()
