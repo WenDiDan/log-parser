@@ -785,6 +785,13 @@ class App:
         root.minsize(1080, 680)
         self.files = []
         self.check_state = {}      # iid -> bool
+        # iid -> 文件字典。勾选结果直接按 iid 取文件，不再依赖「遍历叶子的
+        # 次序 == self.files 的次序」这个隐式约定 —— 刷新往树里插入新文件
+        # 之后两者的顺序必然对不上，会出现「勾了这个、搜的却是那个」。
+        self.file_by_iid = {}
+        self._device_nodes = {}    # 设备名 -> iid
+        self._module_nodes = {}    # (设备, 模块) -> iid
+        self._refreshing = False
         self.results = []          # 已收集结果行
         self.worker = None
         self.out_q = queue.Queue()
@@ -922,6 +929,8 @@ class App:
         bar = tk.Menu(self.root)
         m_file = tk.Menu(bar, tearoff=0)
         m_file.add_command(label="打开日志目录…", command=self.open_dir, accelerator="Ctrl+O")
+        m_file.add_command(label="刷新目录（读取新增日志）", command=self.refresh_dir,
+                           accelerator="Ctrl+R")
         m_file.add_command(label="导出结果 (CSV)…", command=lambda: self.export("csv"))
         m_file.add_command(label="导出结果 (TXT)…", command=lambda: self.export("txt"))
         m_file.add_separator()
@@ -946,6 +955,7 @@ class App:
         bar.add_cascade(label="帮助", menu=m_help)
         self.root.config(menu=bar)
         self.root.bind("<Control-o>", lambda e: self.open_dir())
+        self.root.bind("<Control-r>", lambda e: self.refresh_dir())
         # 常用快捷键（菜单里也标了，方便发现）
         self.root.bind("<F5>", lambda e: self.start_search())
         self.root.bind("<Control-Return>", lambda e: self.start_search())
@@ -966,7 +976,9 @@ class App:
         row1 = ttk.Frame(toolbar)
         row1.pack(fill="x")
         ttk.Button(row1, text="📁  打开目录", style="Primary.TButton",
-                   command=self.open_dir).pack(side="left", padx=(0, 12))
+                   command=self.open_dir).pack(side="left", padx=(0, 8))
+        ttk.Button(row1, text="🔄  刷新", style="Ghost.TButton",
+                   command=self.refresh_dir).pack(side="left", padx=(0, 12))
         ttk.Label(row1, text="🔍", background=COLORS["bg"]).pack(side="left", padx=(0, 4))
         self.var_kw = tk.StringVar()
         self.entry_kw = ttk.Entry(row1, textvariable=self.var_kw, font=("Microsoft YaHei UI", 11))
@@ -1234,44 +1246,191 @@ class App:
         self.last_dir = d
         self.tree_files.delete(*self.tree_files.get_children(""))
         self.check_state.clear()
-        device_nodes, module_nodes = {}, {}
-        file_owner = []          # (iid, f)
-        for f in self.files:
-            dev = f["device"] or "(根目录)"
-            mod = f["module"] or dev
-            if dev not in device_nodes:
-                device_nodes[dev] = self.tree_files.insert(
-                    "", "end", text="{} {}".format(NODE_ICONS["device"], dev),
-                    values=("☐", 0), open=False)
-                self.check_state[device_nodes[dev]] = False
-            # 模块与设备同名（单层目录）时，文件直接挂在设备节点下
-            parent = device_nodes[dev]
-            if mod != dev:
-                dkey = (dev, mod)
-                if dkey not in module_nodes:
-                    module_nodes[dkey] = self.tree_files.insert(
-                        device_nodes[dev], "end",
-                        text="{} {}".format(NODE_ICONS["module"], mod),
-                        values=("☐", 0), open=False)
-                    self.check_state[module_nodes[dkey]] = False
-                parent = module_nodes[dkey]
-            iid = self.tree_files.insert(
-                parent, "end",
-                text="{} {}  ({})".format(NODE_ICONS["file"], f["file"], self._fmt_size(f["size"])),
-                values=("☐", ""))
-            self.check_state[iid] = False
-            file_owner.append((iid, f))
-        # 文件计数
-        for iid, f in file_owner:
+        self.file_by_iid.clear()
+        self._device_nodes.clear()
+        self._module_nodes.clear()
+        for f in files:
+            parent = self._ensure_nodes(f["device"], f["module"])
+            iid = self._insert_file_node(parent, f)
             self._bump_parent_count(iid)
         self._sort_tree(self.tree_files)
-        total_size = sum(f["size"] for f in self.files)
-        self.var_tree_info.set("{} 模块 / {} 文件 / {}".format(
-            len(device_nodes) + len(module_nodes), len(self.files), self._fmt_size(total_size)))
+        self._update_tree_info()
         self.var_status.set("已加载：{}".format(d))
         self.root.title("{} - {}".format(APP_TITLE, d))
         # 默认全部收起
         self._collapse_all()
+
+    def _ensure_nodes(self, device, module):
+        """取得（必要时创建）设备 / 模块节点，返回文件应挂载的父节点。
+
+        建树与刷新共用同一套层级规则，避免两处各写一遍走偏：
+        模块与设备同名（单层目录）时，文件直接挂在设备节点下。
+        """
+        dev = device or "(根目录)"
+        mod = module or dev
+        iid = self._device_nodes.get(dev)
+        if iid is None or not self.tree_files.exists(iid):
+            iid = self.tree_files.insert(
+                "", "end", text="{} {}".format(NODE_ICONS["device"], dev),
+                values=("☐", 0), open=False)
+            self.check_state[iid] = False
+            self._device_nodes[dev] = iid
+        if mod == dev:
+            return iid
+        key = (dev, mod)
+        mid = self._module_nodes.get(key)
+        if mid is None or not self.tree_files.exists(mid):
+            mid = self.tree_files.insert(
+                iid, "end", text="{} {}".format(NODE_ICONS["module"], mod),
+                values=("☐", 0), open=False)
+            self.check_state[mid] = False
+            self._module_nodes[key] = mid
+        return mid
+
+    def _insert_file_node(self, parent, f):
+        """插入一个文件叶子，并登记 iid -> 文件。"""
+        iid = self.tree_files.insert(
+            parent, "end",
+            text="{} {}  ({})".format(NODE_ICONS["file"], f["file"],
+                                      self._fmt_size(f["size"])),
+            values=("☐", ""))
+        self.check_state[iid] = False
+        self.file_by_iid[iid] = f
+        return iid
+
+    def _update_tree_info(self):
+        """刷新「N 模块 / N 文件 / 总大小」那一行。"""
+        # 数索引而不是数树的子节点：设备节点下会直接挂文件（单层目录），
+        # 那些文件会被当成「模块」多算一遍
+        total = sum(f["size"] for f in self.file_by_iid.values())
+        self.var_tree_info.set("{} 模块 / {} 文件 / {}".format(
+            len(self._device_nodes) + len(self._module_nodes),
+            len(self.file_by_iid), self._fmt_size(total)))
+
+    def refresh_dir(self, silent=False, then=None):
+        """重新扫描当前目录，把新增（以及被删掉、变大了的）文件同步进树里。
+
+        日志是持续写出来的：只在「打开目录」时扫一次的话，之后新写出的
+        文件既不出现在树里、也搜不到 —— 表现就是「明明写进去了却读不到」。
+
+        刷新是增量的，不重建树：已勾选、已展开的状态原样保留，否则每刷
+        一次就得重新勾一遍。then 是刷新结束后的回调（用于「先刷新再搜索」）。
+        """
+        if not self.last_dir:
+            if not silent:
+                messagebox.showinfo(APP_TITLE, "还没有加载日志目录（Ctrl+O）")
+            if then:
+                then()
+            return
+        if self._refreshing:
+            self.var_status.set("正在刷新目录，请稍候…")
+            return
+        self._refreshing = True
+        d = self.last_dir
+        self.var_status.set("正在刷新目录…")
+        try:
+            self.root.config(cursor="watch")
+        except Exception:
+            pass
+
+        def work():
+            files, err = [], None
+            try:
+                files = iter_log_files(d)
+            except Exception as exc:
+                err = exc
+            self.root.after(0, lambda: self._on_dir_refreshed(files, err, silent, then))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_dir_refreshed(self, files, err, silent, then):
+        """刷新扫描结束（回到主线程）：增量同步并汇报变化。"""
+        self._refreshing = False
+        try:
+            self.root.config(cursor="")
+        except Exception:
+            pass
+        if err is not None:
+            self.var_status.set("刷新失败：{}".format(err))
+            if not silent:
+                messagebox.showerror(APP_TITLE, "刷新目录失败：\n{}".format(err))
+            if then:
+                then()
+            return
+        added, removed, resized = self._sync_tree(files)
+        self.files = files
+        self._sort_tree(self.tree_files)
+        self._update_tree_info()
+        if added or removed or resized:
+            self.var_status.set(
+                "已刷新：新增 {} 个文件，移除 {} 个，{} 个大小有变化".format(
+                    added, removed, resized))
+        else:
+            self.var_status.set("已刷新：没有变化")
+        if then:
+            then()
+
+    def _sync_tree(self, files):
+        """把扫描结果与当前树做增量同步，返回 (新增, 移除, 大小变化)。"""
+        old = {}
+        for iid, f in list(self.file_by_iid.items()):
+            if self.tree_files.exists(iid):
+                old[(f["device"], f["module"], f["file"])] = iid
+            else:
+                self.file_by_iid.pop(iid, None)
+                self.check_state.pop(iid, None)
+
+        added = resized = 0
+        seen = set()
+        for f in files:
+            key = (f["device"], f["module"], f["file"])
+            seen.add(key)
+            iid = old.get(key)
+            if iid is None:
+                parent = self._ensure_nodes(f["device"], f["module"])
+                iid = self._insert_file_node(parent, f)
+                # 新写出的文件跟随父节点的勾选：否则「我明明勾了这个模块」
+                # 却搜不到新日志 —— 那这个刷新就没解决用户的问题
+                if self.check_state.get(parent):
+                    self._set_check(iid, True)
+                self._bump_parent_count(iid)
+                added += 1
+                continue
+            prev = self.file_by_iid.get(iid) or {}
+            if prev.get("size") != f.get("size"):
+                self.tree_files.item(iid, text="{} {}  ({})".format(
+                    NODE_ICONS["file"], f["file"], self._fmt_size(f["size"])))
+                resized += 1
+            self.file_by_iid[iid] = f          # size / path 可能已变
+        removed = 0
+        for key, iid in old.items():
+            if key in seen:
+                continue
+            self._bump_parent_count(iid, -1)   # 先减计数，删掉后就找不到父节点了
+            parent = self.tree_files.parent(iid)
+            self.tree_files.delete(iid)
+            self.file_by_iid.pop(iid, None)
+            self.check_state.pop(iid, None)
+            self._prune_empty(parent)
+            removed += 1
+        return added, removed, resized
+
+    def _prune_empty(self, iid):
+        """删掉因文件被移除而变空的模块 / 设备节点。"""
+        while iid:
+            if self.tree_files.get_children(iid):
+                break
+            pid = self.tree_files.parent(iid)
+            self.tree_files.delete(iid)
+            self.check_state.pop(iid, None)
+            # 顺手摘掉索引里的失效 iid，否则下次刷新会拿到已销毁的节点
+            for k, v in list(self._device_nodes.items()):
+                if v == iid:
+                    del self._device_nodes[k]
+            for k, v in list(self._module_nodes.items()):
+                if v == iid:
+                    del self._module_nodes[k]
+            iid = pid
 
     @staticmethod
     def _fmt_size(n):
@@ -1283,12 +1442,13 @@ class App:
             return "{:.1f} MB".format(n / (1024 * 1024))
         return "{:.0f} KB".format(n / 1024)
 
-    def _bump_parent_count(self, iid):
+    def _bump_parent_count(self, iid, delta=1):
+        """把文件祖先节点的「文件数」列加减 delta。"""
         pid = self.tree_files.parent(iid)
         while pid:
             cnt = self.tree_files.set(pid, "count")
             try:
-                self.tree_files.set(pid, "count", int(cnt or 0) + 1)
+                self.tree_files.set(pid, "count", int(cnt or 0) + delta)
             except ValueError:
                 pass
             pid = self.tree_files.parent(pid)
@@ -1398,9 +1558,8 @@ class App:
         if not self.files:
             messagebox.showinfo(APP_TITLE, "请先打开日志目录（Ctrl+O）")
             return
-        sel = self._collect_selected()
-        if not sel:
-            messagebox.showinfo(APP_TITLE, "请先在左侧勾选要搜索的文件 / 模块 / 设备")
+        if self._refreshing:
+            self.var_status.set("正在刷新目录，请稍候再搜索…")
             return
         kw = self.var_kw.get().strip()
         if self.var_regex.get():
@@ -1429,16 +1588,35 @@ class App:
             except ValueError:
                 max_results = 50000
 
+        ctx = {"keywords": keywords, "ts": ts, "te": te, "max_results": max_results}
+        # 搜索前先增量刷新一次：日志一直在往外写，不刷新的话这次搜索覆盖
+        # 不到刚生成的文件，用户会以为「搜过了但没有」。刷新是后台进行的，
+        # 完成后自动接着搜。校验放在刷新之前，参数不合格就不必白扫一遍。
+        if self.last_dir:
+            self.refresh_dir(silent=True, then=lambda: self._launch_search(ctx))
+        else:
+            self._launch_search(ctx)
+
+    def _launch_search(self, ctx):
+        """真正启动搜索（在刷新之后）。
+
+        勾选的文件要等到这里才收集：刷新可能刚补进来一批新文件，
+        而它们是否参与本次搜索取决于父节点的勾选状态。
+        """
+        sel = self._collect_selected()
+        if not sel:
+            messagebox.showinfo(APP_TITLE, "请先在左侧勾选要搜索的文件 / 模块 / 设备")
+            return
         self._cancel_worker()
         self.clear_results(silent=True)
         self.results = []
         # 开新搜索前清掉上一轮可能残留的 batch，避免旧结果混入新搜索
         self._drain_queues()
-        self.worker = SearchWorker(sel, keywords, self.var_regex.get(),
-                                    self.var_all.get(), self.var_err.get(),
-                                    ts, te, max_results,
-                                    self.out_q, self.progress_q,
-                                    error_patterns=self.error_patterns)
+        self.worker = SearchWorker(sel, ctx["keywords"], self.var_regex.get(),
+                                   self.var_all.get(), self.var_err.get(),
+                                   ctx["ts"], ctx["te"], ctx["max_results"],
+                                   self.out_q, self.progress_q,
+                                   error_patterns=self.error_patterns)
         self._searching = True
         # 搜索按钮变成「停止」，给用户一个取消入口
         self.btn_search.config(text="⏹  停止", command=self._cancel_search)
@@ -1449,19 +1627,23 @@ class App:
         self._save_config()
 
     def _collect_selected(self):
-        """遍历树收集被勾选的文件（叶子=文件）"""
+        """收集被勾选的文件（叶子=文件），按树的显示顺序返回。
+
+        直接按 iid 查文件，不再用「遍历到第几个叶子」去索引 self.files：
+        那个约定要求树的叶子顺序与列表顺序完全一致，而刷新会往树里插入
+        新文件，顺序必然被打乱，结果就是「勾了这个、搜的却是那个」。
+        """
         sel = []
-        idx = [0]
 
         def walk(node):
             for ch in self.tree_files.get_children(node):
-                kids = self.tree_files.get_children(ch)
-                if kids:
-                    walk(ch)
-                else:
+                f = self.file_by_iid.get(ch)
+                if f is not None:
                     if self.check_state.get(ch):
-                        sel.append(self.files[idx[0]])
-                    idx[0] += 1
+                        sel.append(f)
+                else:
+                    walk(ch)
+
         for top in self.tree_files.get_children(""):
             walk(top)
         return sel
