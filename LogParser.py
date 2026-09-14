@@ -81,7 +81,7 @@ except Exception:
     pass
 
 APP_TITLE = "设备日志解析器"
-APP_VERSION = "1.0.15"           # 当前版本号（与 version.txt / version.json 保持一致）
+APP_VERSION = "1.0.16"           # 当前版本号（与 version.txt / version.json 保持一致）
 
 # 远程升级：更新清单地址（version.json）。
 # 支持两种形式，二选一改为你的实际地址即可：
@@ -401,21 +401,22 @@ def iter_log_files(root):
     return files
 
 
-def match_error_reason(text):
+def match_error_reason(text, patterns=None):
     """返回命中的异常关键词；没命中返回 None。
 
     判定用的是朴素子串匹配，所以「超时设置」「失败重试次数」这类正常文案
-    也会命中。与其悄悄改判定规则，不如把命中的词暴露到界面上（详情窗口），
-    让用户一眼看出是真异常还是误判。
+    也会命中。两件事缓解这个问题：
+      1. 关键词可在界面里编辑（不同产线的异常词并不相同）；
+      2. 命中的词会显示在详情窗口里，便于人工确认是真异常还是误判。
     """
-    for p in ERROR_PATTERNS:
-        if p in text:
+    for p in (patterns if patterns is not None else ERROR_PATTERNS):
+        if p and p in text:
             return p
     return None
 
 
-def is_error_line(text):
-    return match_error_reason(text) is not None
+def is_error_line(text, patterns=None):
+    return match_error_reason(text, patterns) is not None
 
 
 def read_lines(path):
@@ -463,8 +464,10 @@ class SearchWorker(threading.Thread):
     """后台流式搜索；结果经 queue 送回 UI"""
 
     def __init__(self, files, keywords, use_regex, match_all,
-                 only_error, t_start, t_end, max_results, out_q, progress_q):
+                 only_error, t_start, t_end, max_results, out_q, progress_q,
+                 error_patterns=None):
         super().__init__(daemon=True)
+        self.error_patterns = error_patterns
         self.files = files
         self.keywords = keywords
         self.use_regex = use_regex
@@ -504,7 +507,8 @@ class SearchWorker(threading.Thread):
                         continue
                     if self.t_end and ts and ts > self.t_end:
                         continue
-                    if self.only_error and not is_error_line(text):
+                    if self.only_error and not is_error_line(
+                            text, self.error_patterns):
                         continue
                     if not self._match(text):
                         continue
@@ -539,8 +543,10 @@ class StatsWorker(threading.Thread):
     - 额外采集：异常按小时分布、起止时间（用于异常率与峰值时段展示）
     """
 
-    def __init__(self, files, out_q, progress_q=None, progress_every=2000):
+    def __init__(self, files, out_q, progress_q=None, progress_every=2000,
+                 error_patterns=None):
         super().__init__(daemon=True)
+        self.error_patterns = error_patterns
         self.files = files
         self.out_q = out_q
         self.progress_q = progress_q
@@ -577,7 +583,7 @@ class StatsWorker(threading.Thread):
                             first_ts = ts
                         if ts > last_ts:
                             last_ts = ts
-                    if is_error_line(text):
+                    if is_error_line(text, self.error_patterns):
                         err_count[mod] = err_count.get(mod, 0) + 1
                         if hour:
                             err_hour[hour] = err_hour.get(hour, 0) + 1
@@ -918,6 +924,8 @@ class App:
         bar.add_cascade(label="文件", menu=m_file)
         m_tool = tk.Menu(bar, tearoff=0)
         m_tool.add_command(label="统计", command=self.show_stats)
+        m_tool.add_command(label="异常判定关键词…",
+                           command=self._set_error_keywords)
         bar.add_cascade(label="工具", menu=m_tool)
         m_help = tk.Menu(bar, tearoff=0)
         m_help.add_command(label="升级源设置…", command=self._set_update_source)
@@ -1389,7 +1397,8 @@ class App:
         self.worker = SearchWorker(sel, keywords, self.var_regex.get(),
                                     self.var_all.get(), self.var_err.get(),
                                     ts, te, max_results,
-                                    self.out_q, self.progress_q)
+                                    self.out_q, self.progress_q,
+                                    error_patterns=self.error_patterns)
         self._searching = True
         # 搜索按钮变成「停止」，给用户一个取消入口
         self.btn_search.config(text="⏹  停止", command=self._cancel_search)
@@ -1450,7 +1459,7 @@ class App:
             if not getattr(self, "_searching", False):
                 continue
             for ts, mod, fname, text, path, lineno in item:
-                is_err = is_error_line(text)
+                is_err = is_error_line(text, self.error_patterns)
                 tags = ["odd" if len(self.results) % 2 else "even"]
                 if is_err:
                     tags.append("err")
@@ -1612,7 +1621,7 @@ class App:
         info = tk.Text(win, height=3, borderwidth=0, background="#eef1f6",
                        font=("Microsoft YaHei UI", 10), wrap="char")
         head = "文件：{}\n行号：{}    时间：{}".format(path, lineno, ts)
-        reason = match_error_reason(text)
+        reason = match_error_reason(text, self.error_patterns)
         if reason:
             # 把判定依据摊开：子串匹配会误伤「超时设置」这类正常文案
             head += "    ⚠ 判定为异常（命中关键词：{}）".format(reason)
@@ -1709,7 +1718,7 @@ class App:
         canvas_frame.pack(fill="both", expand=True, padx=10, pady=(6, 10))
         q = queue.Queue()
         pq = queue.Queue()
-        worker = StatsWorker(sel, q, pq)
+        worker = StatsWorker(sel, q, pq, error_patterns=self.error_patterns)
 
         # 底部操作条（统计期间放“取消”，完成后换成导出/保存）
         bar = ttk.Frame(win)
@@ -2047,6 +2056,8 @@ class App:
             data["limit"] = self.var_limit.get()
             data["date_start"] = self.var_ds.get()
             data["date_end"] = self.var_de.get()
+            data["error_patterns"] = list(
+                getattr(self, "error_patterns", None) or ERROR_PATTERNS)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -2054,7 +2065,14 @@ class App:
 
     def _apply_config(self):
         c = self.config or {}
+        # 异常判定关键词：默认用内置表；配置里存过就以配置为准
+        # （存空列表也是合法的——等于不再把任何行标为异常）
+        self.error_patterns = list(ERROR_PATTERNS)
         try:
+            saved_pats = c.get("error_patterns")
+            if isinstance(saved_pats, (list, tuple)):
+                self.error_patterns = [str(x).strip() for x in saved_pats
+                                       if str(x).strip()]
             if "keyword" in c:
                 self.var_kw.set(c["keyword"])
             if "regex" in c:
@@ -2538,6 +2556,134 @@ class App:
             "升级失败：{}\n\n若已下载但替换未生效，请查看日志：\n%TEMP%\\LogParser_update.log"
             .format(msg))
         self.btn_update.config(text="🔔 升级失败，重试", state="normal")
+
+    def _recolor_results(self):
+        """按当前异常关键词给已有结果重新打标（无需重新搜索）。"""
+        pats = getattr(self, "error_patterns", None)
+        for iid in self.tree_res.get_children(""):
+            try:
+                idx = int(iid)
+            except (TypeError, ValueError):
+                continue
+            if not (0 <= idx < len(self.results)):
+                continue
+            tags = ["odd" if idx % 2 else "even"]
+            if is_error_line(self.results[idx][3], pats):
+                tags.append("err")
+            try:
+                self.tree_res.item(iid, tags=tuple(tags))
+            except Exception:
+                pass
+
+    def _set_error_keywords(self):
+        """编辑异常判定关键词：命中任一即视为异常行（标红 + 计入统计）。"""
+        win = make_dialog(self.root, "异常判定关键词", 640, 560)
+
+        tk.Label(win, text="异常判定关键词", bg=COLORS["bg"], fg=COLORS["text"],
+                 font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(win, text="日志行里出现任一关键词就判定为「异常行」（结果表标红、统计计入异常）。\n"
+                          "各产线的措辞不一样，可按实际情况增删；每行一个。",
+                 bg=COLORS["bg"], fg=COLORS["muted"], justify="left",
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=18)
+
+        box = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                       highlightbackground=COLORS["border"])
+        box.pack(fill="both", expand=True, padx=18, pady=(10, 6))
+        txt = tk.Text(box, font=("Consolas", 10), height=10, relief="flat",
+                      bg=COLORS["card"], fg=COLORS["text"],
+                      insertbackground=COLORS["text"], highlightthickness=0,
+                      padx=10, pady=8, spacing1=3, spacing3=3, undo=True,
+                      selectbackground=COLORS["primary_hover_bg"],
+                      selectforeground=COLORS["text"])
+        ysb = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ysb.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+
+        cur = getattr(self, "error_patterns", None) or ERROR_PATTERNS
+        txt.insert("1.0", "\n".join(cur))
+
+        status = tk.Label(win, text="", bg=COLORS["bg"], fg=COLORS["muted"],
+                          anchor="w", font=("Microsoft YaHei UI", 9))
+        status.pack(fill="x", padx=18)
+
+        def _patterns():
+            return [s.strip() for s in txt.get("1.0", "end").splitlines() if s.strip()]
+
+        # 试算：粘一行真实日志进来，立刻看到判定结果
+        test_row = tk.Frame(win, bg=COLORS["bg"])
+        test_row.pack(fill="x", padx=18, pady=(10, 0))
+        tk.Label(test_row, text="试一行日志：", bg=COLORS["bg"], fg=COLORS["text"],
+                 font=("Microsoft YaHei UI", 9)).pack(side="left")
+        var_test = tk.StringVar()
+        ttk.Entry(test_row, textvariable=var_test,
+                  font=("Consolas", 9)).pack(side="left", fill="x", expand=True,
+                                             padx=(6, 0))
+        lbl_test = tk.Label(win, text="", bg=COLORS["bg"], fg=COLORS["muted"],
+                            anchor="w", font=("Microsoft YaHei UI", 9))
+        lbl_test.pack(fill="x", padx=18, pady=(3, 0))
+
+        def _refresh_test(*_a):
+            line = var_test.get()
+            if not line:
+                lbl_test.configure(text="（粘一行日志进来，立刻看到会不会被判为异常）",
+                                   fg=COLORS["muted"])
+                return
+            hit = match_error_reason(line, _patterns())
+            if hit:
+                lbl_test.configure(text="→ 判定为异常，命中「{}」".format(hit),
+                                   fg=COLORS["danger"])
+            else:
+                lbl_test.configure(text="→ 不视为异常", fg=COLORS["success"])
+
+        def _refresh_all(*_a):
+            n = len(_patterns())
+            status.configure(
+                text="共 {} 个关键词".format(n) if n
+                else "关键词为空：结果表不会再标红任何行",
+                fg=COLORS["muted"] if n else COLORS["danger"])
+            _refresh_test()
+
+        var_test.trace_add("write", _refresh_all)
+
+        def _on_modified(event=None):
+            if txt.edit_modified():
+                txt.edit_modified(False)     # 复位，否则只触发一次
+                _refresh_all()
+
+        txt.bind("<<Modified>>", _on_modified)
+        _refresh_all()
+
+        def _reset():
+            txt.delete("1.0", "end")
+            txt.insert("1.0", "\n".join(ERROR_PATTERNS))
+            _refresh_all()
+
+        def _save():
+            pats = _patterns()
+            if not pats and not messagebox.askyesno(
+                    APP_TITLE,
+                    "关键词为空，结果表将不再标红任何行、统计里的异常数也会归零。\n\n"
+                    "确定保存吗？"):
+                return
+            self.error_patterns = pats
+            self._save_config()
+            # 已有结果直接按新规则重新着色，不必重新搜索
+            self._recolor_results()
+            win.destroy()
+            self.var_status.set("异常关键词已更新（{} 个），结果已按新规则重新标记"
+                                .format(len(pats)))
+
+        bar = tk.Frame(win, bg=COLORS["bg"])
+        bar.pack(fill="x", padx=18, pady=(12, 16))
+        ttk.Button(bar, text="恢复默认", style="Ghost.TButton",
+                   command=_reset).pack(side="left")
+        ttk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(bar, text="保存", style="Primary.TButton",
+                   command=_save).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def _set_update_source(self):
         """配置多个远程升级清单地址（version.json）：每行一个，按顺序尝试，首个可用者生效"""
