@@ -22,5 +22,11 @@ BUILD_ARGS = [
     "--hidden-import=urllib.request",
     "--hidden-import=PIL",
     "--hidden-import=PIL.ImageTk",
+    # 统计图依赖占了整个包约六成体积：matplotlib（13.9MB 未压缩）会连带
+    # 拉进 numpy 以及一个 19.6MB 的 OpenBLAS DLL。程序里有完整的文本统计
+    # 回退（各模块行数 / 每小时分布 / █ 直方条，数据一项不少），
+    # 因此这里排除掉，exe 体积大约减半——统计界面从柱状图变文本表。
+    "--exclude-module=matplotlib",
+    "--exclude-module=numpy",
     "LogParser.py",
 ]
