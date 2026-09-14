@@ -44,20 +44,8 @@ _iso.Python = _InProcPython
 _parent.Python = _InProcPython
 _bm.isolated.Python = _InProcPython
 
-# Build with the exact same arguments as the release tool's build step.
-argv = [
-    "--onefile",
-    "--windowed",
-    "--icon=app.ico",
-    "--add-data=app.ico;.",
-    "--version-file=version.txt",
-    "--name=LogParser",
-    "--noconfirm",
-    "--hidden-import=urllib.request",
-    "--hidden-import=PIL",
-    "--hidden-import=PIL.ImageTk",
-    "LogParser.py",
-]
+# 与 ReleaseTool.py 共用同一份打包参数（build_args.py），避免两边写偏
+from build_args import BUILD_ARGS as argv
 
 from PyInstaller.__main__ import run
 

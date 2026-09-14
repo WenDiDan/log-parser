@@ -11,6 +11,7 @@ publish_github.py、publish_local.py、verify_release.py）融合到一个窗口
 
 所有子任务都在后台线程执行，输出经 queue 回到主线程实时显示，界面不卡。
 """
+import datetime
 import json
 import os
 import queue
@@ -20,7 +21,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 try:
     _reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -53,18 +54,7 @@ FG_T = ("Microsoft YaHei UI", 15, "bold")
 FG_S = ("Microsoft YaHei UI", 9)
 MONO = ("Consolas", 9)
 
-BUILD_ARGS = [
-    "--onefile", "--windowed",
-    "--icon=app.ico",
-    "--add-data=app.ico;.",
-    "--version-file=version.txt",
-    "--name=LogParser",
-    "--noconfirm",
-    "--hiddenurllib.request",
-    "--hidden-import=PIL",
-    "--hidden-import=PIL.ImageTk",
-    "LogParser.py",
-]
+from build_args import BUILD_ARGS   # 与 build_inproc.py 共用同一份
 
 STEP_NAMES = ["1 检查版本", "2 打包", "3 发布", "4 发布后自检"]
 STEP_COLORS = {"idle": IDLE_C, "run": RUN_C, "ok": OK_C, "fail": BAD_C,
@@ -79,6 +69,34 @@ def read_app_version():
         return m.group(1) if m else "?"
     except Exception:
         return "?"
+
+
+# 需要跟版本号一起走的清单：dist/ 那份供本地发布用，不能漏
+MANIFESTS = [
+    "version.json",
+    "dist/version.json",
+    "github-release/version.json",
+    "gitee-release/LogParser/version.json",
+]
+
+
+def read_manifest_field(path, key):
+    """读清单里的某个字段（读不到返回空串）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return str(json.load(f).get(key) or "")
+    except Exception:
+        return ""
+
+
+def suggest_next_version(ver):
+    """把 1.0.14 推成 1.0.15，作为输入框的默认值。"""
+    try:
+        parts = [int(x) for x in ver.split(".")]
+        parts[-1] += 1
+        return ".".join(str(x) for x in parts)
+    except Exception:
+        return ""
 
 
 def load_tool_config():
@@ -361,6 +379,19 @@ class ReleaseTool:
                       "（支持 U 盘 / UNC 共享）",
                  bg=CARD, fg=MUTED, font=FG_S).pack(anchor="w", pady=(4, 0))
 
+        # 版本号：一键升级并同步全部清单（源码是唯一真源）
+        ver_row = tk.Frame(inner, bg=CARD)
+        ver_row.pack(fill="x", pady=(12, 0))
+        tk.Label(ver_row, text="版本号：", bg=CARD, fg=TEXT, font=FG).pack(side="left")
+        self.lbl_bump = tk.Label(ver_row, text="v" + self.ver, bg=CARD, fg=ACCENT,
+                                 font=FG_B)
+        self.lbl_bump.pack(side="left")
+        ttk.Button(ver_row, text="升级版本…",
+                   command=self.on_bump).pack(side="left", padx=(10, 0))
+        tk.Label(ver_row,
+                 text="改源码 + 同步 version.txt / 各清单 + 更新升级提示",
+                 bg=CARD, fg=MUTED, font=FG_S).pack(side="left", padx=(10, 0))
+
         btns = tk.Frame(inner, bg=CARD)
         btns.pack(fill="x", pady=(16, 0))
         self.btn_all = ttk.Button(btns, text="一键全流程", style="Accent.TButton",
@@ -524,8 +555,118 @@ class ReleaseTool:
         return [self.py_pub, "-u", os.path.join(HERE, script)] + list(args)
 
     def _step_check(self):
-        return (0, "检查版本一致性",
-                lambda w: w.run_cmd(self._py("check_version.py")))
+        def do(w):
+            if not w.run_cmd(self._py("check_version.py")):
+                w.log("!! 版本不一致：可点「升级版本…」一键同步，"
+                      "或手动运行 check_version.py --fix")
+                return False
+            # 版本号改了但升级提示文案没跟上，现场用户会看到「升级至 v旧版本」
+            stale = []
+            for rel in MANIFESTS:
+                note = read_manifest_field(os.path.join(HERE, *rel.split("/")), "notes")
+                if note and ("v" + self.ver) not in note:
+                    stale.append(rel)
+            if stale:
+                w.log("[WARN] 以下清单的升级提示里没有 v{}：{}".format(
+                    self.ver, "、".join(stale)))
+                w.log("       现场用户升级后会看到旧版本说明，建议先用「升级版本…」")
+                return "warn"
+            w.log("版本一致，且清单提示文案已包含 v{}".format(self.ver))
+            return True
+        return (0, "检查版本一致性", do)
+
+    def _step_bump(self, old_ver, new_ver):
+        """升级版本号：改源码唯一真源，再让 check_version.py 同步其余清单。"""
+        def do(w):
+            src = os.path.join(HERE, "LogParser.py")
+            try:
+                with open(src, "r", encoding="utf-8") as f:
+                    text = f.read()
+                pat = r'(^APP_VERSION\s*=\s*["\'])' + re.escape(old_ver) + r'(["\'])'
+                text2, n = re.subn(pat, r"\g<1>" + new_ver + r"\g<2>", text,
+                                   count=1, flags=re.M)
+                if not n:
+                    w.log('!! 在 LogParser.py 里找不到 APP_VERSION = "{}"'.format(old_ver))
+                    return False
+                with open(src, "w", encoding="utf-8", newline="") as f:
+                    f.write(text2)
+                w.log("已更新 LogParser.py：APP_VERSION = " + new_ver)
+            except Exception as exc:
+                w.log("!! 修改源码失败: {}".format(exc))
+                return False
+
+            # version.txt 的 4 处 + 各清单的 version / url 由它统一改写
+            if not w.run_cmd(self._py("check_version.py", "--fix")):
+                return False
+
+            today = datetime.date.today().isoformat()
+            for rel in MANIFESTS:
+                p = os.path.join(HERE, *rel.split("/"))
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as exc:
+                    w.log("!! 读取 {} 失败: {}".format(rel, exc))
+                    return False
+                touched = []
+                note = str(data.get("notes") or "")
+                if "v" + old_ver in note:
+                    data["notes"] = note.replace("v" + old_ver, "v" + new_ver)
+                    touched.append("notes")
+                if data.get("published"):
+                    data["published"] = today
+                    touched.append("published")
+                if not touched:
+                    continue
+                try:
+                    with open(p, "w", encoding="utf-8", newline="") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                        f.write("\n")
+                except Exception as exc:
+                    w.log("!! 写入 {} 失败: {}".format(rel, exc))
+                    return False
+                w.log("已更新 {}：{}".format(rel, "、".join(touched)))
+
+            if not w.run_cmd(self._py("check_version.py")):
+                return False
+            self.root.after(0, self._refresh_version)
+            return True
+        return (0, "升级版本 v{} -> v{}".format(old_ver, new_ver), do)
+
+    def on_bump(self):
+        if self.busy:
+            return
+        new = simpledialog.askstring(
+            "升级版本", "输入新版本号（当前 v{}）：".format(self.ver),
+            initialvalue=suggest_next_version(self.ver), parent=self.root)
+        if not new:
+            return
+        new = new.strip().lstrip("vV").strip()
+        if not re.match(r"^\d+\.\d+\.\d+$", new):
+            messagebox.showwarning(
+                "版本号格式",
+                "请使用 x.y.z 三段式数字，例如 {}".format(
+                    suggest_next_version(self.ver) or "1.0.15"))
+            return
+        if new == self.ver:
+            messagebox.showinfo("无需修改", "新版本号与当前版本相同。")
+            return
+        if not messagebox.askyesno(
+                "确认升级版本",
+                "v{old}  ->  v{new}\n\n"
+                "将一次性修改：\n"
+                "  · LogParser.py 的 APP_VERSION（唯一真源）\n"
+                "  · version.txt 里的 4 处版本号\n"
+                "  · 4 份 version.json 的 version / url\n"
+                "  · 清单里的升级提示文案与发布日期\n\n"
+                "继续？".format(old=self.ver, new=new)):
+            return
+        self._start([self._step_bump(self.ver, new)], active={0})
+
+    def _refresh_version(self):
+        self.ver = read_app_version()
+        self.lbl_ver.configure(text="当前版本  v" + self.ver)
+        self.lbl_bump.configure(text="v" + self.ver)
 
     def _step_build(self):
         def do(w):
