@@ -307,6 +307,67 @@ COLORS = {
 }
 
 
+# ---- 对话框辅助（让弹窗与主界面共用同一套设计令牌，避免风格割裂） ----
+def center_window(win, owner=None, width=None, height=None):
+    """把窗口居中到父窗口（无父窗口则居中到屏幕），并夹在屏幕可见区域内。"""
+    win.update_idletasks()
+    w = width or win.winfo_width()
+    h = height or win.winfo_height()
+    try:
+        if owner is not None and owner.winfo_exists():
+            x = owner.winfo_rootx() + max(0, (owner.winfo_width() - w) // 2)
+            y = owner.winfo_rooty() + max(0, (owner.winfo_height() - h) // 3)
+        else:
+            raise ValueError
+    except Exception:
+        x = (win.winfo_screenwidth() - w) // 2
+        y = (win.winfo_screenheight() - h) // 3
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    x = max(0, min(x, max(0, sw - w)))
+    y = max(0, min(y, max(0, sh - h)))
+    win.geometry("{}x{}+{}+{}".format(w, h, x, y))
+
+
+def make_dialog(owner, title, width, height, resizable=False):
+    """创建与主界面同一套配色的模态对话框。"""
+    win = tk.Toplevel(owner)
+    win.title(title)
+    set_window_icon(win)
+    win.configure(background=COLORS["bg"])
+    win.transient(owner)
+    win.resizable(resizable, resizable)
+    center_window(win, owner, width, height)
+    win.grab_set()
+    return win
+
+
+def load_icon_photo(size):
+    """把 app.ico 里最大的一帧缩放到 size×size，返回 PhotoImage（失败返回 None）。"""
+    path = resource_path("app.ico")
+    if not os.path.exists(path):
+        return None
+    try:
+        from PIL import Image, ImageTk
+        im = Image.open(path)
+        best = None
+        for i in range(getattr(im, "n_frames", 1)):
+            try:
+                im.seek(i)
+            except Exception:
+                break
+            if best is None or im.size[0] > best.size[0]:
+                best = im.copy().convert("RGBA")
+        if best is None:
+            return None
+        try:
+            resample = Image.Resampling.LANCZOS      # Pillow >= 9.1
+        except AttributeError:
+            resample = Image.LANCZOS
+        return ImageTk.PhotoImage(best.resize((size, size), resample))
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- 数据层
 def iter_log_files(root):
     """遍历根目录，返回 [{'device','module','path','file','date','shift','size'}]"""
@@ -1930,6 +1991,14 @@ class App:
 
 # ---- 远程升级：UI 相关方法 ----
     def _check_update(self, manual=False):
+        # 用户正开着模态对话框（升级源设置、升级确认等）时先不打扰，15 秒后重试。
+        # 否则启动 4 秒后的自动检查会在用户刚进设置、输入到一半时弹出「发现新版本」。
+        try:
+            if not manual and self.root.grab_current() is not None:
+                self.root.after(15000, self._check_update)
+                return
+        except Exception:
+            pass
         threading.Thread(target=self._check_update_worker,
                          args=(manual,), daemon=True).start()
 
@@ -2364,36 +2433,93 @@ class App:
 
     def _set_update_source(self):
         """配置多个远程升级清单地址（version.json）：每行一个，按顺序尝试，首个可用者生效"""
-        win = tk.Toplevel(self.root)
-        win.title("升级源设置")
-        set_window_icon(win)
-        win.configure(background=COLORS["bg"])
-        win.transient(self.root)
-        win.grab_set()
-        win.geometry("700x440")
-
-        tk.Label(win, text="升级源（version.json 地址），每行一个：",
-                 bg=COLORS["bg"], fg=COLORS["text"],
-                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
-        tk.Label(win, text="按顺序尝试，第一个可用的生效；某源不可用时自动回落下一个。\n"
-                          "支持 HTTP(S) 直链、局域网 UNC 路径或本地路径。",
-                 bg=COLORS["bg"], fg=COLORS["muted"],
-                 font=("Microsoft YaHei UI", 9), justify="left").pack(anchor="w", padx=16)
-
-        frame = tk.Frame(win, bg=COLORS["bg"])
-        frame.pack(fill="both", expand=True, padx=16, pady=(10, 6))
-        txt = tk.Text(frame, wrap="none", font=("Consolas", 10), height=10)
-        sb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=sb.set)
-        txt.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
         cur_list = (getattr(self, "update_manifests", None)
                     or [getattr(self, "update_manifest", UPDATE_MANIFEST)])
+
+        # 升级源都是很长的 URL，写死宽度必然裁掉尾部；按最长一条自适应，
+        # 但不超过屏幕的 82%，放不下时仍有水平滚动条兜底。
+        try:
+            import tkinter.font as tkfont
+            fm = tkfont.Font(font=("Consolas", 10))
+            longest = max([fm.measure(x) for x in cur_list] or [0])
+        except Exception:
+            longest = 0
+        want = max(780, longest + 18 * 2 + 22 + 24 + 18)
+        dlg_w = min(want, int(self.root.winfo_screenwidth() * 0.82))
+        win = make_dialog(self.root, "升级源设置", dlg_w, 520)
+
+        tk.Label(win, text="升级源（version.json 地址），每行一个",
+                 bg=COLORS["bg"], fg=COLORS["text"],
+                 font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(win, text="按顺序尝试，第一个可用的生效；某源不可用时自动回落到下一个。\n"
+                          "支持 HTTP(S) 直链、局域网 UNC 路径（\\\\服务器\\共享\\…）、本地路径。",
+                 bg=COLORS["bg"], fg=COLORS["muted"], justify="left",
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=18)
+
+        # 输入区：白底卡片 + 双向滚动条。
+        # 原先是 wrap="none" 却只有垂直滚动条，长 URL 的尾部会被直接裁掉
+        # （用户根本看不到自己填的地址后一半，也就无从判断填对没有）。
+        wrap = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                        highlightbackground=COLORS["border"])
+        wrap.pack(fill="both", expand=True, padx=18, pady=(10, 6))
+        txt = tk.Text(wrap, wrap="none", font=("Consolas", 10), height=10,
+                      relief="flat", bg=COLORS["card"], fg=COLORS["text"],
+                      insertbackground=COLORS["text"], highlightthickness=0,
+                      padx=10, pady=8, spacing1=3, spacing3=3, undo=True,
+                      selectbackground=COLORS["primary_hover_bg"],
+                      selectforeground=COLORS["text"])
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+        xsb = ttk.Scrollbar(wrap, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+        xsb.grid(row=1, column=0, sticky="ew", padx=2, pady=(0, 2))
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        # 格式不合法的行实时标红：不必等点了保存才被告知哪一行有问题
+        txt.tag_configure("bad", background=COLORS["danger_bg"], foreground="#b91c1c")
+
         txt.insert("1.0", "\n".join(cur_list))
+
+        # 状态提示单独一行（Text 已限制 height，不会再把它挤出窗口）
+        status = tk.Label(win, text="", bg=COLORS["bg"], fg=COLORS["muted"],
+                          anchor="w", font=("Microsoft YaHei UI", 9))
+        status.pack(fill="x", padx=18, pady=(2, 0))
+
+        def _revalidate(event=None):
+            txt.tag_remove("bad", "1.0", "end")
+            total = 0
+            bad = 0
+            for i, raw in enumerate(txt.get("1.0", "end").splitlines(), start=1):
+                s = normalize_manifest(raw)
+                if not s:
+                    continue
+                total += 1
+                if not valid_manifest(s):
+                    bad += 1
+                    txt.tag_add("bad", "{}.0".format(i), "{}.end".format(i))
+            if bad:
+                status.config(fg=COLORS["danger"],
+                              text="共 {} 个地址，其中 {} 个格式不合法（已标红，保存时会被忽略）"
+                                   .format(total, bad))
+            else:
+                status.config(fg=COLORS["muted"],
+                              text="共 {} 个地址，格式均有效".format(total))
+
+        # 用 <<Modified>> 而不是 <KeyRelease>：粘贴、程序写入、撤销等任何内容
+        # 变化都会触发，校验不会漏（KeyRelease 在窗口没有焦点时根本不触发）。
+        def _on_modified(event=None):
+            if txt.edit_modified():
+                txt.edit_modified(False)    # 复位，否则该事件只会触发一次
+                _revalidate()
+
+        txt.bind("<<Modified>>", _on_modified)
 
         def _reset():
             txt.delete("1.0", "end")
             txt.insert("1.0", "\n".join([x for x in UPDATE_MANIFESTS if valid_manifest(x)]))
+            _revalidate()
 
         def _save():
             items = []
@@ -2447,18 +2573,105 @@ class App:
                 "已保存 {} 个升级源（按顺序尝试）：\n\n{}\n\n"
                 "下次启动或点击「检查更新…」时生效。".format(len(items), "\n".join(items)))
 
-        btn_row = tk.Frame(win, bg=COLORS["bg"])
-        btn_row.pack(fill="x", padx=16, pady=(0, 14))
-        ttk.Button(btn_row, text="恢复默认", command=_reset).pack(side="left")
-        ttk.Button(btn_row, text="取消", command=win.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(btn_row, text="保存", style="Primary.TButton", command=_save).pack(side="right")
+        bar = tk.Frame(win, bg=COLORS["bg"])
+        bar.pack(fill="x", padx=18, pady=(10, 16))
+        ttk.Button(bar, text="恢复默认", style="Ghost.TButton",
+                   command=_reset).pack(side="left")
+        ttk.Button(bar, text="取消", command=win.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(bar, text="保存", style="Primary.TButton",
+                   command=_save).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+        _revalidate()
+        # 高度按内容自适应：字体行高随系统 DPI 变化很大，写死高度会把底部按钮裁掉
+        win.update_idletasks()
+        center_window(win, self.root, dlg_w,
+                      min(win.winfo_reqheight(),
+                          int(self.root.winfo_screenheight() * 0.85)))
 
     def _about(self):
-        messagebox.showinfo(
-            APP_TITLE,
-            "{}  v{}\n\n公司：Di\n产品：Equipment Log Parser\n\n"
-            "远程升级：配置更新清单后，本程序可自动检测并一键升级。"
-            .format(APP_TITLE, APP_VERSION))
+        """关于窗口。
+
+        原先直接调 messagebox.showinfo：系统原生灰底弹窗与主界面的
+        卡片式设计语言完全脱节，信息也全挤在一段文本里。这里改为
+        自定义窗口——图标 + 产品名 + 版本徽标，信息分区块对齐。
+        """
+        win = make_dialog(self.root, "关于 " + APP_TITLE, 470, 320)
+
+        outer = tk.Frame(win, bg=COLORS["bg"])
+        outer.pack(fill="both", expand=True, padx=18, pady=(18, 0))
+
+        box = tk.Frame(outer, bg=COLORS["card"], highlightthickness=1,
+                       highlightbackground=COLORS["border"])
+        box.pack(fill="both", expand=True)
+
+        # ---- 头部：图标 + 名称 + 版本徽标 ----
+        head = tk.Frame(box, bg=COLORS["card"])
+        head.pack(fill="x", padx=18, pady=(18, 14))
+        photo = load_icon_photo(56)
+        if photo is not None:
+            ico = tk.Label(head, image=photo, bg=COLORS["card"])
+            ico.image = photo          # 保持引用，否则会被 GC 回收
+            ico.pack(side="left", padx=(0, 14))
+        meta = tk.Frame(head, bg=COLORS["card"])
+        meta.pack(side="left", anchor="w")
+        tk.Label(meta, text=APP_TITLE, bg=COLORS["card"], fg=COLORS["text"],
+                 font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w")
+        sub = tk.Frame(meta, bg=COLORS["card"])
+        sub.pack(anchor="w", pady=(5, 0))
+        tk.Label(sub, text="Equipment Log Parser", bg=COLORS["card"],
+                 fg=COLORS["muted"],
+                 font=("Microsoft YaHei UI", 9)).pack(side="left")
+        tk.Label(sub, text="v" + APP_VERSION, bg=COLORS["card"],
+                 fg=COLORS["primary"],
+                 font=("Segoe UI Semibold", 10)).pack(side="left", padx=(8, 0))
+
+        tk.Frame(box, bg=COLORS["border"], height=1).pack(fill="x", padx=18)
+
+        # ---- 信息区：标签右对齐 / 值左对齐，自然成列 ----
+        # 版本号已在头部徽标里显示，此处不再重复，避免同一信息出现两遍
+        info = tk.Frame(box, bg=COLORS["card"])
+        info.pack(fill="x", padx=18, pady=(14, 4))
+        for i, (k, v) in enumerate((("公司", "Di"),
+                                    ("产品", "Equipment Log Parser"),
+                                    ("配置目录", CONFIG_DIR))):
+            tk.Label(info, text=k, bg=COLORS["card"], fg=COLORS["muted"],
+                     font=("Microsoft YaHei UI", 9),
+                     anchor="e").grid(row=i, column=0, sticky="e", pady=2)
+            tk.Label(info, text=v, bg=COLORS["card"], fg=COLORS["text"],
+                     font=("Microsoft YaHei UI", 9),
+                     anchor="w").grid(row=i, column=1, sticky="w",
+                                      padx=(12, 0), pady=2)
+
+        tk.Frame(box, bg=COLORS["border"], height=1).pack(fill="x", padx=18,
+                                                          pady=(12, 0))
+
+        # ---- 远程升级说明 ----
+        tip = tk.Frame(box, bg=COLORS["card"])
+        tip.pack(fill="x", padx=18, pady=(12, 16))
+        tk.Label(tip, text="🔄  远程升级", bg=COLORS["card"], fg=COLORS["text"],
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        tk.Label(tip, text="配置更新清单后，本程序可自动检测并一键升级。",
+                 bg=COLORS["card"], fg=COLORS["muted"],
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(4, 0))
+
+        # ---- 底部按钮 ----
+        bar = tk.Frame(win, bg=COLORS["bg"])
+        bar.pack(fill="x", padx=18, pady=16)
+
+        def _open_sources():
+            win.destroy()
+            self.root.after(60, self._set_update_source)
+
+        ttk.Button(bar, text="升级源设置", style="Ghost.TButton",
+                   command=_open_sources).pack(side="left")
+        ttk.Button(bar, text="确定", style="Primary.TButton",
+                   command=win.destroy).pack(side="right")
+
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Return>", lambda e: win.destroy())
+        # 高度按内容自适应，避免写死尺寸后中文换行被裁切
+        win.update_idletasks()
+        center_window(win, self.root, 470, win.winfo_reqheight())
 
 
 def main():
