@@ -116,9 +116,27 @@ UPDATE_MANIFESTS = [
 ]
 
 
+def normalize_manifest(u):
+    """把用户输入的升级源地址规范化。
+
+    容错两类常见「复制粘贴污染」，它们都会让地址被判为非法并在保存/启动时
+    被**静默丢弃**（用户看到的现象就是「自己配置的升级源地址莫名消失了」）：
+      1. 首尾带着引号，如 "\\\\server\\share\\version.json"
+      2. 用正斜杠写的 UNC 路径，如 //server/share/version.json
+    """
+    s = (u or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1]
+    s = s.strip()
+    # 正斜杠 UNC（但不碰 http(s)://）统一成反斜杠，保证后续解析一致
+    if s.startswith("//") and not s.lower().startswith(("http://", "https://")):
+        s = "\\\\" + s.lstrip("/").replace("/", "\\")
+    return s
+
+
 def valid_manifest(u):
     """升级源地址是否已填写且合法（用于跳过未配置的占位符与空值）"""
-    u = (u or "").strip()
+    u = normalize_manifest(u)
     if not u or "<" in u or ">" in u:
         return False
     return (u.lower().startswith(("http://", "https://", "\\\\"))
@@ -1889,9 +1907,11 @@ class App:
             self.update_manifests = []
             saved_list = c.get("update_manifests")
             if isinstance(saved_list, (list, tuple)):
-                self.update_manifests = [x for x in saved_list if valid_manifest(x)]
+                # 规范化后再收：配置里历史遗留的「带引号地址」也能被救回来
+                self.update_manifests = [normalize_manifest(x) for x in saved_list
+                                         if valid_manifest(x)]
             if not self.update_manifests:
-                single = c.get("update_manifest") or UPDATE_MANIFEST
+                single = normalize_manifest(c.get("update_manifest") or UPDATE_MANIFEST)
                 if single in LEGACY_MANIFESTS:
                     single = UPDATE_MANIFEST
                 if valid_manifest(single):
@@ -2377,14 +2397,35 @@ class App:
 
         def _save():
             items = []
-            for line in txt.get("1.0", "end").splitlines():
-                line = line.strip()
-                if line and valid_manifest(line) and line not in items:
-                    items.append(line)
+            ignored = []
+            for raw in txt.get("1.0", "end").splitlines():
+                s = normalize_manifest(raw)
+                if not s:
+                    continue
+                if valid_manifest(s):
+                    if s not in items:
+                        items.append(s)
+                else:
+                    ignored.append(raw.strip())
             if not items:
                 messagebox.showwarning(APP_TITLE, "没有可用的升级源地址，已取消修改。\n"
                                                   "请至少填写一行合法地址。")
                 return
+            # 明确列出被忽略的行：以前是静默跳过，用户以为保存成功，
+            # 结果「自己配置的地址不见了」
+            if ignored:
+                preview = "\n".join(ignored[:5])
+                if len(ignored) > 5:
+                    preview += "\n…（共 {} 行）".format(len(ignored))
+                if not messagebox.askyesno(
+                        APP_TITLE,
+                        "以下 {} 行地址格式不被支持，保存时会被忽略：\n\n{}\n\n"
+                        "支持的写法：\n"
+                        "  https://…/version.json\n"
+                        "  \\\\服务器\\共享\\version.json\n"
+                        "  D:\\目录\\version.json\n\n"
+                        "仍要保存其余地址吗？".format(len(ignored), preview)):
+                    return
             # 拦一下被截断的 UNC 路径（例如只剩 \\192）：它能通过 valid_manifest
             # 的「以 \\ 开头」判断，但实际永远不可用，且会以合法源的身份一直
             # 留在配置里（表现为「配置好的地址源悄悄失效」）
