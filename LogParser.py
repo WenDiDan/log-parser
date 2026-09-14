@@ -1863,6 +1863,48 @@ class App:
             txt.tag_add("err", "1.0", "end")
         txt.configure(state="disabled")
 
+        # 上下文区（默认折叠）：这条日志前后发生了什么
+        CONTEXT_SPAN = 20
+        ctx_holder = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
+                              highlightbackground=COLORS["border"])
+        ctx_txt = tk.Text(ctx_holder, height=9, font=("Consolas", 9),
+                          bg=COLORS["card"], fg=COLORS["text"], relief="flat",
+                          wrap="none", padx=10, pady=8, highlightthickness=0)
+        ctx_ysb = ttk.Scrollbar(ctx_holder, orient="vertical",
+                                command=ctx_txt.yview)
+        ctx_txt.configure(yscrollcommand=ctx_ysb.set)
+        ctx_txt.pack(side="left", fill="both", expand=True)
+        ctx_ysb.pack(side="right", fill="y")
+        ctx_txt.tag_configure("cur", background="#fff2a8")
+
+        def toggle_ctx():
+            """展开/收起该行在原文件里的上下文（按需读取，不动整份文件）。"""
+            if ctx_holder.winfo_ismapped():
+                ctx_holder.pack_forget()
+                btn_ctx.configure(text="查看上下文")
+                return
+            ctx_txt.configure(state="normal")
+            ctx_txt.delete("1.0", "end")
+            try:
+                got = []
+                # 只读到目标行往下 20 行就停，大文件/网络盘也不会卡
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for i, raw in enumerate(f, 1):
+                        if i > lineno + CONTEXT_SPAN:
+                            break
+                        if i >= lineno - CONTEXT_SPAN:
+                            got.append((i, raw.rstrip("\r\n")))
+                if not got:
+                    ctx_txt.insert("end", "（未能在文件中定位到该行）")
+                for i, s in got:
+                    ctx_txt.insert("end", "{:>6}  {}\n".format(i, s),
+                                   ("cur",) if i == lineno else ())
+            except Exception as exc:
+                ctx_txt.insert("end", "（读取失败：{}）".format(exc))
+            ctx_txt.configure(state="disabled")
+            ctx_holder.pack(fill="x", padx=12, pady=(0, 6), before=bar)
+            btn_ctx.configure(text="收起上下文")
+
         # 底部操作条
         bar = tk.Frame(win, bg=COLORS["bg"])
         bar.pack(fill="x", padx=12, pady=(0, 12))
@@ -1871,6 +1913,9 @@ class App:
         ttk.Button(bar, text="打开原文件", style="Ghost.TButton",
                    command=lambda: self._open_original(path)).pack(
             side="left", padx=(8, 0))
+        btn_ctx = ttk.Button(bar, text="查看上下文", style="Ghost.TButton",
+                             command=toggle_ctx)
+        btn_ctx.pack(side="left", padx=(8, 0))
 
         # 上一条 / 下一条：顺着结果往下看，不必关窗口回列表再双击
         hidden = getattr(self, "_hidden_iids", set())
