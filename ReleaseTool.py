@@ -56,17 +56,6 @@ MONO = ("Consolas", 9)
 
 from build_args import BUILD_ARGS   # 与 build_inproc.py 共用同一份
 
-# exe 的文件版本比对直接复用 check_version.py —— publish_gitee.py /
-# publish_github.py 也用它，避免同一件事出现两套读法、两边结论不一致。
-try:
-    from check_version import exe_file_version, exe_matches_version
-except Exception:                      # 单独拷走本工具时也不能崩
-    def exe_file_version(_path):
-        return ""
-
-    def exe_matches_version(_path, _expect):
-        return None
-
 STEP_NAMES = ["1 发布前检查", "2 打包", "3 发布", "4 发布后自检"]
 STEP_COLORS = {"idle": IDLE_C, "run": RUN_C, "ok": OK_C, "fail": BAD_C,
                "warn": RUN_C, "cancel": MUTED}
@@ -100,6 +89,29 @@ def read_manifest_field(path, key):
         return ""
 
 
+def exe_version_matches(exe_path, expect):
+    """exe 的文件版本是否与 expect 一致。True/False，无法判断返回 None。
+
+    复用 check_version.py 的实现 —— publish_gitee.py / publish_github.py
+    用的是同一份，避免同一件事出现两套读法、两边结论不一致。
+    """
+    try:
+        from check_version import exe_matches_version
+    except Exception:                  # 单独拷走本工具时不该直接崩
+        return None
+    return exe_matches_version(exe_path, expect)
+
+
+def exe_version_str(exe_path):
+    """exe 的文件版本，取前三段（如 1.0.17）；读不到返回空串。"""
+    try:
+        from check_version import exe_file_version
+    except Exception:
+        return ""
+    raw = exe_file_version(exe_path)
+    return ".".join(str(int(x)) for x in re.findall(r"\d+", raw)[:3])
+
+
 def exe_version_problem(exe_path, expect):
     """exe 的文件版本与清单不一致时返回描述文本；一致或无法判断返回 None。
 
@@ -108,11 +120,10 @@ def exe_version_problem(exe_path, expect):
     """
     if not expect or not os.path.isfile(exe_path):
         return None
-    if exe_matches_version(exe_path, expect) is not False:
+    if exe_version_matches(exe_path, expect) is not False:
         return None
-    raw = exe_file_version(exe_path)
-    core = ".".join(str(int(x)) for x in re.findall(r"\d+", raw)[:3])
-    return "打包产物是 v{}，清单是 v{}".format(core or "?", expect)
+    return "打包产物是 v{}，清单是 v{}".format(
+        exe_version_str(exe_path) or "?", expect)
 
 
 def _git_env():
@@ -901,8 +912,16 @@ class ReleaseTool:
 
             if git_has_tag(tag):
                 w.log("标签 {} 已存在，跳过".format(tag))
-            elif not w.run_cmd(["git", "tag", "-a", tag, "-m", msg]):
-                return False
+            else:
+                # annotated tag 也要记录创建者，身份没配时同样会失败，
+                # 所以 -c 不能只给 commit —— 否则就是「提交成功、标签没打」
+                rc, out = run_git(["-c", "user.name=" + name,
+                                   "-c", "user.email=" + email,
+                                   "tag", "-a", tag, "-m", msg])
+                if rc != 0:
+                    w.log("!! 创建标签失败：" + out)
+                    return False
+                w.log("已创建标签 " + tag)
 
             if run_git(["remote", "get-url", "origin"])[0] != 0:
                 w.log("（没有配置远程 origin，跳过推送）")
@@ -1014,9 +1033,9 @@ class ReleaseTool:
             # PyInstaller 不会报错，打出来的包版本号却是旧的，要等发布
             # 脚本拒绝、或者现场升级后才发现。
             cur = read_app_version()
-            if exe_matches_version(src, cur) is False:
+            if exe_version_matches(src, cur) is False:
                 w.log("!! 打包产物的文件版本是 {}，与当前版本 v{} 不一致".format(
-                    exe_file_version(src) or "?", cur))
+                    exe_version_str(src) or "?", cur))
                 w.log("   version.txt 可能没同步：先跑 check_version.py --fix 再打包")
                 return False
             w.log("打包产物版本校验 OK（v{}）".format(cur))
