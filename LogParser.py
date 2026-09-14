@@ -1864,7 +1864,7 @@ class App:
         prog = ttk.Progressbar(win, mode="indeterminate")
         prog.pack(fill="x", padx=12, pady=(6, 0))
         prog.start(12)
-        # matplotlib 画布容器
+        # 统计内容容器（纯文本表）
         canvas_frame = ttk.Frame(win)
         canvas_frame.pack(fill="both", expand=True, padx=10, pady=(6, 10))
         q = queue.Queue()
@@ -1928,98 +1928,20 @@ class App:
         drain_progress()
 
     def _render_stats(self, win, info, canvas_frame, nfiles, stats):
-        """matplotlib 绘图；matplotlib 不可用时回退文本。"""
-        total = stats.get("total", 0)
-        mod_count = stats.get("mod_count", {})
-        hour_count = stats.get("hour_count", {})
-        err_count = stats.get("err_count", {})
-        err_hour = stats.get("err_hour", {})
-        first_ts = stats.get("first_ts", "")
-        last_ts = stats.get("last_ts", "")
-        try:
-            import matplotlib
-            matplotlib.use("TkAgg")
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            from matplotlib.figure import Figure
-            # Windows 下优先用微软雅黑显示中文，避免方框
-            matplotlib.rcParams["font.sans-serif"] = [
-                "Microsoft YaHei UI", "Microsoft YaHei", "SimHei",
-                "SimSun", "DejaVu Sans"]
-            matplotlib.rcParams["axes.unicode_minus"] = False
-        except Exception as e:
-            self._show_stats_text(canvas_frame, info, nfiles, stats, str(e))
-            return
+        """渲染统计结果（纯文本）。
 
-        err_total = sum(err_count.values())
-        rate = (err_total / total * 100) if total else 0.0
-        span = ("{} ~ {}".format(first_ts[:16], last_ts[:16])
-                if first_ts and last_ts else "—")
-        if hour_count:
-            peak_h = max(hour_count, key=hour_count.get)
-            peak_txt = "{} ({} 行)".format(peak_h, hour_count[peak_h])
-        else:
-            peak_txt = "—"
-        info.configure(text="文件 {}    总行数 {}    异常 {} ({:.2f}%)    时段 {}    峰值 {}".format(
-            nfiles, total, err_total, rate, span, peak_txt))
+        原先这里会优先用 matplotlib 画柱状图，现已彻底移除：matplotlib 会连带
+        拉进 numpy 与一个约 20MB 的 OpenBLAS，合计占安装包六成体积，而下面这张
+        文本表的数据一点不少（各模块行数/异常数、每小时分布、异常率、峰值时段）。
+        build_args.py 里也相应排除了这两个依赖。
+        """
+        self._render_stats_text(canvas_frame, info, nfiles, stats)
 
-        # 模块 Top15
-        mods = sorted(mod_count, key=mod_count.get, reverse=True)[:15]
-        vals = [mod_count[m] for m in mods]
-        colors = [COLORS["danger"] if err_count.get(m, 0) else COLORS["primary"]
-                  for m in mods]
-
-        fig = Figure(figsize=(8.6, 6.6), dpi=100)
-        # 子图 1：各模块行数（含异常标红）
-        ax1 = fig.add_subplot(2, 1, 1)
-        bars = ax1.bar(range(len(mods)), vals, color=colors)
-        ax1.set_xticks(range(len(mods)))
-        ax1.set_xticklabels(mods, rotation=30, ha="right", fontsize=8)
-        ax1.set_title("各模块行数（红色=含异常）", fontsize=12)
-        ax1.set_ylabel("行数")
-        for b, v in zip(bars, vals):
-            ax1.text(b.get_x() + b.get_width() / 2, v, str(v),
-                     ha="center", va="bottom", fontsize=7)
-        ax1.margins(y=0.15)
-
-        # 子图 2：每小时分布（叠加异常数，便于定位故障时段）
-        ax2 = fig.add_subplot(2, 1, 2)
-        hours = sorted(hour_count)[-48:]
-        hvals = [hour_count[h] for h in hours]
-        evals = [err_hour.get(h, 0) for h in hours]
-        step = max(1, len(hours) // 8)
-        ax2.bar(range(len(hours)), hvals, color=COLORS["primary"], alpha=0.35,
-                label="总行数")
-        if err_total:
-            ax2.bar(range(len(hours)), evals, color=COLORS["danger"], alpha=0.9,
-                    label="异常数")
-        ax2.set_xticks(range(0, len(hours), step))
-        ax2.set_xticklabels([hours[i] for i in range(0, len(hours), step)],
-                            rotation=30, ha="right", fontsize=7)
-        ax2.set_title("每小时分布（最近 48 小时，红色=异常）", fontsize=12)
-        ax2.set_ylabel("行数")
-        if err_total:
-            ax2.legend(fontsize=8, loc="upper left")
-
-        fig.tight_layout(pad=2.0)
-        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # 底部：导出 / 保存图片
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=12, pady=(0, 8))
-
-        def save_png():
-            from tkinter import filedialog
-            path = filedialog.asksaveasfilename(defaultextension=".png",
-                filetypes=[("PNG 图片", "*.png")], title="保存统计图")
-            if path:
-                fig.savefig(path, dpi=150)
-                info.configure(text=info.cget("text") + "    已保存: " + path)
-        ttk.Button(bar, text="💾 保存图片", command=save_png).pack(side="right")
         ttk.Button(bar, text="📄 导出统计CSV",
                    command=lambda: self._export_stats_csv(nfiles, stats)).pack(
-            side="right", padx=(0, 6))
+            side="right")
 
     def _export_stats_csv(self, nfiles, stats):
         """把统计结果导出为 CSV（概览 + 模块维度 + 小时维度）。"""
@@ -2056,8 +1978,8 @@ class App:
             return
         self.var_status.set("统计已导出 → {}".format(path))
 
-    def _show_stats_text(self, parent, info, nfiles, stats, err=None):
-        """matplotlib 不可用时的纯文本回退。"""
+    def _render_stats_text(self, parent, info, nfiles, stats):
+        """把统计结果渲染成文本表：各模块行数/异常数 + 每小时分布。"""
         total = stats.get("total", 0)
         mod_count = stats.get("mod_count", {})
         hour_count = stats.get("hour_count", {})
@@ -2073,8 +1995,6 @@ class App:
         txt.pack(side="left", fill="both", expand=True)
         ysb.pack(side="right", fill="y")
         lines = []
-        if err:
-            lines.append("（matplotlib 不可用：{}）\n".format(err))
         lines.append("═" * 62)
         lines.append(" 文件数: {}    总行数: {}    异常: {} ({:.2f}%)".format(
             nfiles, total, err_total, rate))
