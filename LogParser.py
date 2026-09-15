@@ -1173,16 +1173,14 @@ class App:
         # 这一行用 grid 而不是 pack：pack 里先 expand 的筛选框会先把整行
         # 宽度吃光，后 pack 的操作按钮只能分到 0，被压成 1 像素宽。
         #
-        # 两列都不给 weight：各自只占内容需要的宽度，按钮就紧跟在筛选框右边，
-        # 中间不留缝。weight 给筛选框的话它会撑满整行、把按钮顶到最右边，
-        # 中间空出一大块。
-        row2.columnconfigure(0, weight=0)
+        # 筛选框撑满整行，按钮固定在最右侧
+        row2.columnconfigure(0, weight=1)
         row2.columnconfigure(1, weight=0)
         row2.rowconfigure(0, weight=1)
 
-        # 筛选框按内容宽度排列，操作按钮紧挨着它
+        # 筛选占满整行，操作按钮固定靠右
         filter_frame = ttk.LabelFrame(row2, text=" 筛选 ", padding=(10, 6))
-        filter_frame.grid(row=0, column=0, sticky="w")
+        filter_frame.grid(row=0, column=0, sticky="nsew")
 
         self.var_regex = tk.BooleanVar(value=False)
         ttk.Checkbutton(filter_frame, text="正则", variable=self.var_regex).pack(side="left", padx=(0, 10))
@@ -1230,8 +1228,12 @@ class App:
         # 放在筛选框外侧、紧跟其后，而不是框里面：框内的条件控件请求宽度合计
         # 已经接近整行宽度，塞进去只会被压成 1 像素，顺带把「至」和格式提示
         # 也挤没。框外则各占各的，互不影响。
+        # pady 让按钮和框内的复选框落在同一条水平线上：LabelFrame 的「筛选」
+        # 标题占掉了上方一块高度，框里的控件整体偏下约 17px，而按钮是在整行
+        # 范围内垂直居中的，于是看着比内容高出一截。grid 居中分配，所以上边
+        # 距要给两倍。
         actions = ttk.Frame(row2)
-        actions.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        actions.grid(row=0, column=1, sticky="e", padx=(8, 0), pady=(34, 0))
         ttk.Button(actions, text="📊  统计", command=self.show_stats,
                    width=7).pack(side="left")
         ttk.Button(actions, text="💾  CSV", width=6,
