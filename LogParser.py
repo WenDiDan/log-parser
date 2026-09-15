@@ -1183,47 +1183,44 @@ class App:
         filter_frame.grid(row=0, column=0, sticky="nsew")
 
         self.var_regex = tk.BooleanVar(value=False)
-        ttk.Checkbutton(filter_frame, text="正则", variable=self.var_regex).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(filter_frame, text="正则", variable=self.var_regex).pack(side="left", padx=(0, 6))
         self.var_all = tk.BooleanVar(value=False)
-        ttk.Checkbutton(filter_frame, text="全部匹配（AND）", variable=self.var_all).pack(side="left", padx=(0, 10))
+        # 去掉括注里的英文：这一项占 186px，是框内最宽的复选框，而窗口窄到
+        # 1080 时整行会挤到把「至」的日期框压没。
+        ttk.Checkbutton(filter_frame, text="全部匹配", variable=self.var_all).pack(side="left", padx=(0, 6))
         self.var_err = tk.BooleanVar(value=False)
-        ttk.Checkbutton(filter_frame, text="仅异常", variable=self.var_err).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(filter_frame, text="仅异常", variable=self.var_err).pack(side="left", padx=(0, 6))
 
-        ttk.Separator(filter_frame, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Separator(filter_frame, orient="vertical").pack(side="left", fill="y", padx=3)
 
         # 结果上限（用户自选）
         ttk.Label(filter_frame, text="上限").pack(side="left", padx=(0, 2))
         self.var_limit = tk.StringVar(value="50000")
-        self.cbo_limit = ttk.Combobox(filter_frame, textvariable=self.var_limit, width=9,
+        self.cbo_limit = ttk.Combobox(filter_frame, textvariable=self.var_limit, width=6,
                                       state="readonly",
                                       values=["2000", "10000", "20000", "50000", "100000", "不限制"])
         self.cbo_limit.pack(side="left", padx=(0, 10))
 
-        ttk.Separator(filter_frame, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Separator(filter_frame, orient="vertical").pack(side="left", fill="y", padx=3)
 
         # 从 / 至 日期选择
         ttk.Label(filter_frame, text="从").pack(side="left")
         df = ttk.Frame(filter_frame)
-        df.pack(side="left", padx=(2, 8))
+        df.pack(side="left", padx=(2, 4))
         self.var_ds = tk.StringVar()
-        ttk.Entry(df, textvariable=self.var_ds, width=13).pack(side="left")
+        # width=10 刚好能完整显示 "2026-07-20"（10 个字符）；再窄就会把
+        # 最后一位藏起来，用户看着像没输完。
+        ttk.Entry(df, textvariable=self.var_ds, width=10).pack(side="left")
         ttk.Button(df, text="📅", width=2, style="Ghost.TButton",
                    command=lambda: CalendarPopup(self.root, self.var_ds)).pack(side="left", padx=(1, 0))
 
         ttk.Label(filter_frame, text="至").pack(side="left")
         de = ttk.Frame(filter_frame)
-        de.pack(side="left", padx=(2, 8))
+        de.pack(side="left", padx=(2, 5))
         self.var_de = tk.StringVar()
-        ttk.Entry(de, textvariable=self.var_de, width=13).pack(side="left")
+        ttk.Entry(de, textvariable=self.var_de, width=10).pack(side="left")
         ttk.Button(de, text="📅", width=2, style="Ghost.TButton",
                    command=lambda: CalendarPopup(self.root, self.var_de)).pack(side="left", padx=(1, 0))
-
-        # 这行提示原先写着 "格式 2026-07-20 / 2026-07-20 11:00"，占 358px，
-        # 是框内最长的一块固定宽度。按钮现在紧挨着筛选框，两者总宽逼近窗口
-        # 宽度，留着它很容易在 1800 左右的窗口上整排溢出。完整说明在日历
-        # 弹窗里也能看到，这里留个简短的就够。
-        ttk.Label(filter_frame, text="格式 2026-07-20",
-                  style="Muted.TLabel").pack(side="left", padx=(6, 0))
 
         # 放在筛选框外侧、紧跟其后，而不是框里面：框内的条件控件请求宽度合计
         # 已经接近整行宽度，塞进去只会被压成 1 像素，顺带把「至」和格式提示
@@ -1234,12 +1231,13 @@ class App:
         # 距要给两倍。
         actions = ttk.Frame(row2)
         actions.grid(row=0, column=1, sticky="e", padx=(8, 0), pady=(34, 0))
+        # width 要留够：width=6 时 "💾  CSV" 会差一个字符位，"V" 被裁掉。
         ttk.Button(actions, text="📊  统计", command=self.show_stats,
-                   width=7).pack(side="left")
-        ttk.Button(actions, text="💾  CSV", width=6,
+                   width=8).pack(side="left")
+        ttk.Button(actions, text="💾  CSV", width=7,
                    command=lambda: self.export("csv")).pack(
             side="left", padx=(6, 0))
-        ttk.Button(actions, text="📄  TXT", width=6,
+        ttk.Button(actions, text="📄  TXT", width=7,
                    command=lambda: self.export("txt")).pack(
             side="left", padx=(6, 0))
 
