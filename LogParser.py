@@ -1164,14 +1164,20 @@ class App:
         self.btn_search = ttk.Button(row1, text="🔎  搜索", style="Primary.TButton",
                                       command=self.start_search, width=10)
         self.btn_search.pack(side="left", padx=(0, 6))
-        ttk.Button(row1, text="清空", command=self.clear_results, width=8).pack(side="left")
+        ttk.Button(row1, text="清空", command=self.clear_results,
+                   width=8).pack(side="left")
 
         # 第二排：筛选条件 + 次要操作
         row2 = ttk.Frame(toolbar)
         row2.pack(fill="x", pady=(10, 0))
+        # 这一行用 grid 而不是 pack：pack 里先 expand 的筛选框会先把整行
+        # 宽度吃光，后 pack 的操作按钮只能分到 0，被压成 1 像素宽。
+        row2.columnconfigure(0, weight=1)
+        row2.rowconfigure(0, weight=1)
 
+        # 筛选占满整行，操作按钮固定靠右
         filter_frame = ttk.LabelFrame(row2, text=" 筛选 ", padding=(10, 6))
-        filter_frame.pack(side="left", fill="y")
+        filter_frame.grid(row=0, column=0, sticky="nsew")
 
         self.var_regex = tk.BooleanVar(value=False)
         ttk.Checkbutton(filter_frame, text="正则", variable=self.var_regex).pack(side="left", padx=(0, 10))
@@ -1212,11 +1218,25 @@ class App:
         ttk.Label(filter_frame, text="格式 2026-07-20 / 2026-07-20 11:00",
                   style="Muted.TLabel").pack(side="left", padx=(6, 0))
 
+        # 结果类操作靠右放。筛选框已经 expand 撑满整行，两者之间不再留出
+        # 一大片空白。（试过把它们挪到上面那排，但第一排加上之后，窗口缩到
+        #  最小宽度时搜索框会被压没，所以留在这排。）
         actions = ttk.Frame(row2)
-        actions.pack(side="right", fill="y")
-        ttk.Button(actions, text="📊  统计", command=self.show_stats, width=9).pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="💾  CSV", command=lambda: self.export("csv"), width=8).pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="📄  TXT", command=lambda: self.export("txt"), width=8).pack(side="left")
+        actions.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        ttk.Button(actions, text="📊  统计", command=self.show_stats,
+                   width=9).pack(side="left", padx=(0, 6))
+        # 导出两项收进下拉，和「统计」并排看着齐整
+        btn_exp = ttk.Button(actions, text="📤  导出 ▾", width=10)
+        btn_exp.pack(side="left")
+        m_exp = tk.Menu(btn_exp, tearoff=0)
+        m_exp.add_command(label="导出为 CSV…",
+                          command=lambda: self.export("csv"))
+        m_exp.add_command(label="导出为 TXT…",
+                          command=lambda: self.export("txt"))
+        btn_exp.configure(
+            command=lambda: m_exp.tk_popup(
+                btn_exp.winfo_rootx(),
+                btn_exp.winfo_rooty() + btn_exp.winfo_height()))
 
     def _build_body(self):
         # 可拖拽左右分栏
