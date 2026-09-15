@@ -2785,10 +2785,37 @@ class App:
                 return
         except Exception:
             pass
+        # 手动检查时立刻给个回执：请求要等升级源响应（最慢的源有 10 秒超时），
+        # 中间不提示的话，用户会以为点了没反应，然后再点一次。
+        if manual:
+            self.var_status.set("正在检查更新…（正在请求升级源，请稍候）")
+            try:
+                self.root.config(cursor="watch")
+                self.root.update_idletasks()
+            except Exception:
+                pass
         threading.Thread(target=self._check_update_worker,
                          args=(manual,), daemon=True).start()
 
+    UPDATE_CHECK_BUDGET = 8.0       # 手动检查的总时限（秒）
+
     def _check_update_worker(self, manual):
+        try:
+            self._check_update_probe(manual)
+        finally:
+            if manual:
+                self.root.after(0, self._update_check_finished)
+
+    def _update_check_finished(self):
+        try:
+            self.root.config(cursor="")
+        except Exception:
+            pass
+        # 没有新版本时不会弹窗，状态栏若不收尾就会一直停在「正在检查…」
+        if str(self.var_status.get()).startswith("正在检查更新"):
+            self.var_status.set("已是最新版本（v{}）".format(APP_VERSION))
+
+    def _check_update_probe(self, manual):
         sources = [s for s in (getattr(self, "update_manifests", None) or [])
                    if valid_manifest(s)]
         if not sources:
@@ -2798,15 +2825,36 @@ class App:
                     "请点击菜单「帮助 → 升级源设置…」填写 version.json 的地址。"))
             return
         # 遍历所有源并取最高版本：某个源可达但清单偏旧时不能就此停手，
-        # 否则会漏掉后续源里的新版本（多仓容灾的关键）
+        # 否则会漏掉后续源里的新版本（多仓容灾的关键）。
+        #
+        # 并发发起、再统一收口：串行的话总耗时是各源之和，而 GitHub 在
+        # 国内往往要等满超时才失败，一次手动检查就得干等十几秒。并发之后
+        # 总耗时取决于最慢的那个源，再给一个总时限兜底。
         lv = parse_ver(APP_VERSION)
         errors = []
-        best = None                     # (版本元组, 远端信息)
-        for src in sources:
+        found = {}
+
+        def probe(src):
             try:
-                data = json.loads(fetch_text(src))
+                found[src] = json.loads(fetch_text(src))
             except Exception as e:
                 errors.append("{}  ->  {}".format(src, e))
+
+        threads = [threading.Thread(target=probe, args=(s,), daemon=True)
+                   for s in sources]
+        for t in threads:
+            t.start()
+        deadline = time.time() + self.UPDATE_CHECK_BUDGET
+        for t in threads:
+            t.join(timeout=max(0.0, deadline - time.time()))
+
+        # 逐个源会写入同一个字典，等线程停稳（线程结束后其写入已可见）再遍历
+        best = None                     # (版本元组, 远端信息)
+        for src in sources:
+            data = found.get(src)
+            if data is None:
+                if not any(e.startswith(src + " ") for e in errors):
+                    errors.append("{}  ->  超时未响应".format(src))
                 continue
             rv = parse_ver(str(data.get("version", "")))
             if best is None or rv > best[0]:
