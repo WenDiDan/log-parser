@@ -1225,18 +1225,12 @@ class App:
         actions.grid(row=0, column=1, sticky="e", padx=(8, 0))
         ttk.Button(actions, text="📊  统计", command=self.show_stats,
                    width=9).pack(side="left", padx=(0, 6))
-        # 导出两项收进下拉，和「统计」并排看着齐整
-        btn_exp = ttk.Button(actions, text="📤  导出 ▾", width=10)
-        btn_exp.pack(side="left")
-        m_exp = tk.Menu(btn_exp, tearoff=0)
-        m_exp.add_command(label="导出为 CSV…",
-                          command=lambda: self.export("csv"))
-        m_exp.add_command(label="导出为 TXT…",
-                          command=lambda: self.export("txt"))
-        btn_exp.configure(
-            command=lambda: m_exp.tk_popup(
-                btn_exp.winfo_rootx(),
-                btn_exp.winfo_rooty() + btn_exp.winfo_height()))
+        # 不用下拉：多一次点击，而且展开的面板会盖住下面的结果表
+        ttk.Button(actions, text="💾  CSV", width=8,
+                   command=lambda: self.export("csv")).pack(
+            side="left", padx=(0, 6))
+        ttk.Button(actions, text="📄  TXT", width=8,
+                   command=lambda: self.export("txt")).pack(side="left")
 
     def _build_body(self):
         # 可拖拽左右分栏
