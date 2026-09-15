@@ -1218,20 +1218,6 @@ class App:
         ttk.Label(filter_frame, text="格式 2026-07-20 / 2026-07-20 11:00",
                   style="Muted.TLabel").pack(side="left", padx=(6, 0))
 
-        # 结果类操作靠右放。筛选框已经 expand 撑满整行，两者之间不再留出
-        # 一大片空白。（试过把它们挪到上面那排，但第一排加上之后，窗口缩到
-        #  最小宽度时搜索框会被压没，所以留在这排。）
-        actions = ttk.Frame(row2)
-        actions.grid(row=0, column=1, sticky="e", padx=(8, 0))
-        ttk.Button(actions, text="📊  统计", command=self.show_stats,
-                   width=9).pack(side="left", padx=(0, 6))
-        # 不用下拉：多一次点击，而且展开的面板会盖住下面的结果表
-        ttk.Button(actions, text="💾  CSV", width=8,
-                   command=lambda: self.export("csv")).pack(
-            side="left", padx=(0, 6))
-        ttk.Button(actions, text="📄  TXT", width=8,
-                   command=lambda: self.export("txt")).pack(side="left")
-
     def _build_body(self):
         # 可拖拽左右分栏
         paned = ttk.Panedwindow(self.root, orient="horizontal")
@@ -1290,6 +1276,22 @@ class App:
         head = ttk.Frame(right_card, style="Card.TFrame")
         head.pack(fill="x", pady=(0, 6))
         ttk.Label(head, text="📄  匹配结果", style="Head.TLabel").pack(side="left")
+        # 统计与导出紧贴结果表：它们操作的就是这份结果。
+        #
+        # 位置几经调整，最后落在这里。按顺序试过：筛选行右侧（那一排的条件
+        # 控件光请求宽度就占满整行，按钮只分到 1px，1080~1600 宽都一样）、
+        # 结果标题栏（标题栏右半边还有「在结果中筛选」那组，而结果面板在
+        # 最小窗口下只有约 460px，整行会溢出窗口），所以单开一行。
+        head_tools = ttk.Frame(right_card, style="Card.TFrame")
+        head_tools.pack(fill="x", pady=(0, 6))
+        ttk.Button(head_tools, text="📊  统计", command=self.show_stats,
+                   width=7).pack(side="left")
+        ttk.Button(head_tools, text="💾  CSV", width=6,
+                   command=lambda: self.export("csv")).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(head_tools, text="📄  TXT", width=6,
+                   command=lambda: self.export("txt")).pack(
+            side="left", padx=(6, 0))
         # 结果二次筛选：搜出几千条后可就地缩小范围；只隐藏不匹配的行，
         # 原始结果与导出内容都不受影响
         self.var_res_filter = tk.StringVar()
