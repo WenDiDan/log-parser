@@ -1172,12 +1172,17 @@ class App:
         row2.pack(fill="x", pady=(10, 0))
         # 这一行用 grid 而不是 pack：pack 里先 expand 的筛选框会先把整行
         # 宽度吃光，后 pack 的操作按钮只能分到 0，被压成 1 像素宽。
-        row2.columnconfigure(0, weight=1)
+        #
+        # 两列都不给 weight：各自只占内容需要的宽度，按钮就紧跟在筛选框右边，
+        # 中间不留缝。weight 给筛选框的话它会撑满整行、把按钮顶到最右边，
+        # 中间空出一大块。
+        row2.columnconfigure(0, weight=0)
+        row2.columnconfigure(1, weight=0)
         row2.rowconfigure(0, weight=1)
 
-        # 筛选占满整行，操作按钮固定靠右
+        # 筛选框按内容宽度排列，操作按钮紧挨着它
         filter_frame = ttk.LabelFrame(row2, text=" 筛选 ", padding=(10, 6))
-        filter_frame.grid(row=0, column=0, sticky="nsew")
+        filter_frame.grid(row=0, column=0, sticky="w")
 
         self.var_regex = tk.BooleanVar(value=False)
         ttk.Checkbutton(filter_frame, text="正则", variable=self.var_regex).pack(side="left", padx=(0, 10))
@@ -1215,14 +1220,18 @@ class App:
         ttk.Button(de, text="📅", width=2, style="Ghost.TButton",
                    command=lambda: CalendarPopup(self.root, self.var_de)).pack(side="left", padx=(1, 0))
 
-        ttk.Label(filter_frame, text="格式 2026-07-20 / 2026-07-20 11:00",
+        # 这行提示原先写着 "格式 2026-07-20 / 2026-07-20 11:00"，占 358px，
+        # 是框内最长的一块固定宽度。按钮现在紧挨着筛选框，两者总宽逼近窗口
+        # 宽度，留着它很容易在 1800 左右的窗口上整排溢出。完整说明在日历
+        # 弹窗里也能看到，这里留个简短的就够。
+        ttk.Label(filter_frame, text="格式 2026-07-20",
                   style="Muted.TLabel").pack(side="left", padx=(6, 0))
 
-        # 放在筛选框外侧靠右，而不是框里面：框内的条件控件请求宽度合计已经
-        # 接近整行宽度，塞进去只会被压成 1 像素，顺带把「至」和格式提示也
-        # 挤没。框外则各占各的，互不影响。
+        # 放在筛选框外侧、紧跟其后，而不是框里面：框内的条件控件请求宽度合计
+        # 已经接近整行宽度，塞进去只会被压成 1 像素，顺带把「至」和格式提示
+        # 也挤没。框外则各占各的，互不影响。
         actions = ttk.Frame(row2)
-        actions.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        actions.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(actions, text="📊  统计", command=self.show_stats,
                    width=7).pack(side="left")
         ttk.Button(actions, text="💾  CSV", width=6,
