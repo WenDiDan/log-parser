@@ -1173,14 +1173,17 @@ class App:
         # 这一行用 grid 而不是 pack：pack 里先 expand 的筛选框会先把整行
         # 宽度吃光，后 pack 的操作按钮只能分到 0，被压成 1 像素宽。
         #
-        # 筛选框撑满整行，按钮固定在最右侧
-        row2.columnconfigure(0, weight=1)
-        row2.columnconfigure(1, weight=0)
+        # 三列：筛选框按内容宽度、中间弹性留白、按钮固定最右。
+        # 给筛选框 weight 会让它撑满整行，而条件控件只占左边一半，框内右侧
+        # 就留出一大片被边框圈住的空白 —— 看着像少了东西。
+        row2.columnconfigure(0, weight=0)
+        row2.columnconfigure(1, weight=1)
+        row2.columnconfigure(2, weight=0)
         row2.rowconfigure(0, weight=1)
 
-        # 筛选占满整行，操作按钮固定靠右
+        # 筛选框只占内容需要的宽度，操作按钮固定在最右侧
         filter_frame = ttk.LabelFrame(row2, text=" 筛选 ", padding=(10, 6))
-        filter_frame.grid(row=0, column=0, sticky="nsew")
+        filter_frame.grid(row=0, column=0, sticky="nw")
 
         self.var_regex = tk.BooleanVar(value=False)
         ttk.Checkbutton(filter_frame, text="正则", variable=self.var_regex).pack(side="left", padx=(0, 6))
@@ -1222,6 +1225,11 @@ class App:
         ttk.Button(de, text="📅", width=2, style="Ghost.TButton",
                    command=lambda: CalendarPopup(self.root, self.var_de)).pack(side="left", padx=(1, 0))
 
+        # 日期格式示例。筛选框改成按内容宽度排、不再撑满整行之后，这个提示
+        # 可以放心显示，不会再被挤掉。
+        ttk.Label(filter_frame, text="格式 2026-07-20 / 2026-07-20 11:00",
+                  style="Muted.TLabel").pack(side="left", padx=(8, 0))
+
         # 放在筛选框外侧、紧跟其后，而不是框里面：框内的条件控件请求宽度合计
         # 已经接近整行宽度，塞进去只会被压成 1 像素，顺带把「至」和格式提示
         # 也挤没。框外则各占各的，互不影响。
@@ -1230,7 +1238,7 @@ class App:
         # 范围内垂直居中的，于是看着比内容高出一截。grid 居中分配，所以上边
         # 距要给两倍。
         actions = ttk.Frame(row2)
-        actions.grid(row=0, column=1, sticky="e", padx=(8, 0), pady=(34, 0))
+        actions.grid(row=0, column=2, sticky="e", padx=(8, 0), pady=(34, 0))
         # width 要留够：width=6 时 "💾  CSV" 会差一个字符位，"V" 被裁掉。
         ttk.Button(actions, text="📊  统计", command=self.show_stats,
                    width=8).pack(side="left")
