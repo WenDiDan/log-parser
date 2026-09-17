@@ -5,7 +5,7 @@
 :: Usage:
 ::   call "%~dp0_find_python.bat"                        :: only needs stdlib
 ::   call "%~dp0_find_python.bat" tkinter                :: needs tkinter
-::   call "%~dp0_find_python.bat" "tkinter, matplotlib"  :: needs several
+::   call "%~dp0_find_python.bat" "tkinter, PyInstaller"  :: needs several
 ::   if errorlevel 1  -> no usable python found
 ::   "%PY%"  your_script.py
 ::
@@ -13,7 +13,8 @@
 ::   1) LOGPARSER_PYTHON env var (explicit override)
 ::   2) .venv next to this script
 ::   3) C:\Users\<you>\AppData\Local\Python\bin\python.exe   (system 3.x)
-::   4) %USERPROFILE%\.workbuddy\...\envs\default\Scripts\python.exe
+::   4) %LOCALAPPDATA%\Programs\Python\Python3*   (python.org installer)
+::   5) %USERPROFILE%\.workbuddy\...\envs\default\Scripts\python.exe
 ::
 :: Why not just "where python":
 ::   Windows Store installs python.exe / py.exe as stubs under
@@ -39,6 +40,12 @@ set "_WBV=%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.e
 if not defined PY if exist "%_LOCALV%" ("%_LOCALV%" -c "import %_REQ%" >nul 2>nul && set "PY=%_LOCALV%")
 if not defined PY if exist "%_SYS%" ("%_SYS%" -c "import %_REQ%" >nul 2>nul && set "PY=%_SYS%")
 if not defined PY if exist "%_WBV%" ("%_WBV%" -c "import %_REQ%" >nul 2>nul && set "PY=%_WBV%")
+:: 4) standard python.org install under %LOCALAPPDATA%\Programs\Python\Python3*
+if not defined PY (
+  for /d %%G in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+    if not defined PY if exist "%%G\python.exe" ("%%G\python.exe" -c "import %_REQ%" >nul 2>nul && set "PY=%%G\python.exe")
+  )
+)
 
 if not defined PY (
   echo [ERROR] No usable Python found. Required modules: %_REQ% 1>&2

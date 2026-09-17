@@ -242,7 +242,10 @@ def _probe_build_python(path):
     if not path or not os.path.isfile(path):
         return False
     try:
-        p = subprocess.run([path, "-c", "import tkinter, matplotlib, PyInstaller"],
+        # 不再检查 matplotlib：统计图早就改成自绘了，构建参数里也显式排除
+        # （见 build_args.py 的 --exclude-module）。继续要求它会把这台没装
+        # matplotlib 的机器上本来可用的解释器判成不可用，打包和发布都用不了。
+        p = subprocess.run([path, "-c", "import tkinter, PyInstaller"],
                            capture_output=True, timeout=90,
                            creationflags=CREATE_NO_WINDOW)
         return p.returncode == 0
@@ -251,7 +254,7 @@ def _probe_build_python(path):
 
 
 def find_build_python():
-    """找一个同时具备 tkinter + matplotlib + PyInstaller 的解释器。"""
+    """找一个同时具备 tkinter + PyInstaller 的解释器。"""
     cands = [
         os.path.join(HERE, ".venv", "Scripts", "python.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Python", "bin", "python.exe"),
@@ -731,7 +734,7 @@ class ReleaseTool:
             self._append("构建环境: " + build)
         else:
             self.lbl_env.configure(text="构建 Python: 未找到（打包不可用）", fg=BAD_C)
-            self._append("!! 未找到满足 tkinter + matplotlib + PyInstaller 的解释器，"
+            self._append("!! 未找到满足 tkinter + PyInstaller 的解释器，"
                          "打包功能不可用（仍可执行检查 / 发布 / 自检）")
 
     # ---------- 步骤 ----------
