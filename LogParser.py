@@ -544,6 +544,12 @@ class SearchWorker(threading.Thread):
                 for lineno, raw in enumerate(read_lines(f["path"]), 1):
                     if self.cancel:
                         break
+                    # 空行直接跳过。它既没有时间也没有内容，进了结果就是一行
+                    # 「— / 空白」；而且因为没有时间戳，日期范围也拦不住它
+                    # （`ts` 为空时 `ts < t_start` 判不出来，条件整体为假）。
+                    # StatsWorker 一直有这一步，SearchWorker 漏了。
+                    if not raw.strip():
+                        continue
                     ts, text = parse_line(raw)
                     if self.t_start and ts and ts < self.t_start:
                         continue
