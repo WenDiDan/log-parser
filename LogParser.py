@@ -540,6 +540,16 @@ class SearchWorker(threading.Thread):
         for f in self.files:
             if self.cancel:
                 break
+            # 日志文件按日期命名（2026-07-20_09_12.txt），整天无关的文件直接
+            # 跳过：省掉逐行解析，也不会因为文件里那几行没写时间戳而漏进结果
+            # —— 行级过滤拦不住没有时间戳的行。日期解析不出来的文件照常搜，
+            # 不误伤。
+            fdate = f.get("date") or ""
+            if fdate:
+                if self.t_start and fdate < self.t_start[:10]:
+                    continue
+                if self.t_end and fdate > self.t_end[:10]:
+                    continue
             try:
                 for lineno, raw in enumerate(read_lines(f["path"]), 1):
                     if self.cancel:
