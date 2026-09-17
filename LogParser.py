@@ -981,6 +981,25 @@ class App:
         root.after(4000, self._check_update)   # 启动 4 秒后静默检查更新
 
     # ---- 布局 -------------------------------------------------------
+    def _maybe_init_sash(self, event=None):
+        """首次拿到真实宽度时，把左右分栏推到偏左：左树约 300px。
+
+        用 Configure 而不是 after(N)：固定延迟在某些机器上仍赶在布局完成
+        之前，那时 winfo_width() 还是 1，算出来的位置等于没设。
+        """
+        if getattr(self, "_sash_done", True):
+            return
+        try:
+            w = self.paned_body.winfo_width()
+            if w <= 1:
+                return
+            # 0.28 是按左树的实际需要定的：设备名（如 Ultrasonicwelding2）
+            # 要 200px 上下，加上「选 / 文件数」两列和滚动条，265 会把名字截掉。
+            self.paned_body.sashpos(0, max(260, min(340, int(w * 0.28))))
+            self._sash_done = True
+        except Exception:
+            pass
+
     def _build_style(self):
         style = ttk.Style(self.root)
         # clam 支持自定义滚动条宽度/滑块配色（vista 的滚动条由系统接管无法改粗细）
@@ -1253,6 +1272,13 @@ class App:
         # 可拖拽左右分栏
         paned = ttk.Panedwindow(self.root, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.paned_body = paned
+        # Panedwindow 初始按两侧的请求宽度分，左树因此占掉一半以上，结果表
+        # 被压到 440 像素左右，「内容」列直接看不见。等它第一次拿到真实宽度
+        # 再把 sash 推到偏左位置，而且只做一次 —— 之后用户自己拖动的位置
+        # 不该被覆盖。
+        self._sash_done = False
+        paned.bind("<Configure>", self._maybe_init_sash)
 
         # 左：文件树（卡片化）
         left_outer = ttk.Frame(paned, padding=0)
@@ -1277,9 +1303,11 @@ class App:
         self.tree_files.heading("#0", text="设备 / 模块 / 文件", anchor="w")
         self.tree_files.heading("check", text="选", anchor="center")
         self.tree_files.heading("count", text="文件数", anchor="center")
-        self.tree_files.column("check", width=55, anchor="center", stretch=False)
-        self.tree_files.column("count", width=95, anchor="center", stretch=False)
-        self.tree_files.column("#0", width=240, minwidth=140, stretch=True)
+        # sash 现在停在 265 附近，左侧总宽有限；把「选 / 文件数」收窄，
+        # 好让设备与模块名不至于被截（原来这两列要 150px）。
+        self.tree_files.column("check", width=42, anchor="center", stretch=False)
+        self.tree_files.column("count", width=55, anchor="center", stretch=False)
+        self.tree_files.column("#0", width=240, minwidth=120, stretch=True)
         vsb = ttk.Scrollbar(tf, orient="vertical", command=self.tree_files.yview)
         self.tree_files.configure(yscrollcommand=vsb.set)
         self.tree_files.grid(row=0, column=0, sticky="nsew")
@@ -1328,14 +1356,21 @@ class App:
         rf.rowconfigure(0, weight=1)
         self.tree_res = ttk.Treeview(rf, columns=("time", "module", "file", "text"),
                                      selectmode="browse", show="headings")
-        # 默认 stretch=True；仅「内容」列可随窗口宽度自动拉伸
-        for col, txt, w, anchor in (
-                ("time", "时间", 200, "w"), ("module", "模块", 130, "w"),
-                ("file", "文件", 210, "w"), ("text", "内容", 500, "w")):
+        # 前三列固定宽度、只有「内容」列随窗口拉伸，并给它一个保底宽度。
+        # 原先前三列合计就要 540px，而结果面板在常见窗口下只有 700 上下，
+        # 「内容」被挤到几乎看不见 —— 那恰恰是查日志最该看的一列。
+        # 时间给 215：界面的字体偏大，19 个字符的 "2026-07-20 11:14:05" 约需
+        # 215px，给 178 仍会被截成 "2026-07-20 11:1"。文件名同理。这几列都
+        # 可以被拖动调整，初始值宁可先给够。
+        for col, txt, w, minw, stretch in (
+                ("time", "时间", 215, 150, False),
+                ("module", "模块", 100, 70, False),
+                ("file", "文件", 200, 120, False),
+                ("text", "内容", 400, 160, True)):
             self.tree_res.heading(col, text=txt, anchor="w",
                                   command=lambda c=col: self._sort_results(c))
-            self.tree_res.column(col, width=w, anchor=anchor,
-                                 stretch=(col == "text"))
+            self.tree_res.column(col, width=w, minwidth=minw, anchor="w",
+                                 stretch=stretch)
         vsb = ttk.Scrollbar(rf, orient="vertical", command=self.tree_res.yview)
         self.tree_res.configure(yscrollcommand=vsb.set)
         self.tree_res.grid(row=0, column=0, sticky="nsew")
