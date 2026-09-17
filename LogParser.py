@@ -2229,12 +2229,18 @@ class App:
         if not (0 <= idx < len(self.results)):
             return
         ts, mod, fname, text, path, lineno = self.results[idx]
-        # 非模态：可以同时开好几个详情对照着看
-        win = make_dialog(
-            self.root,
-            "详情 - {} {}    （第 {} / {} 条）".format(
-                mod, ts, idx + 1, len(self.results)),
-            920, 660, resizable=True, modal=False)
+        # 复用同一个详情窗口：上一条/下一条只换里面的内容。原来每次翻页都
+        # destroy 再新建一个窗口，会闪烁、位置重置、焦点也丢，翻起来很不顺手。
+        win = getattr(self, "_detail_win", None)
+        if win is None or not win.winfo_exists():
+            win = make_dialog(self.root, "", 920, 660,
+                              resizable=True, modal=False)
+            self._detail_win = win
+        else:
+            for ch in win.winfo_children():
+                ch.destroy()
+        win.title("详情 - {} {}    （第 {} / {} 条）".format(
+            mod, ts, idx + 1, len(self.results)))
 
         # 顶部信息卡
         info_card = tk.Frame(win, bg=COLORS["card"], highlightthickness=1,
@@ -2397,6 +2403,7 @@ class App:
             if ctx_holder.winfo_ismapped():
                 ctx_holder.pack_forget()
                 btn_ctx.configure(text="查看上下文")
+                self._ctx_open = False
                 return
             ctx_txt.configure(state="normal")
             ctx_txt.delete("1.0", "end")
@@ -2419,6 +2426,7 @@ class App:
             ctx_txt.configure(state="disabled")
             ctx_holder.pack(fill="x", padx=12, pady=(0, 6), before=bar)
             btn_ctx.configure(text="收起上下文")
+            self._ctx_open = True
 
         # 底部操作条
         bar = tk.Frame(win, bg=COLORS["bg"])
@@ -2444,7 +2452,7 @@ class App:
                 nxt += delta
             else:
                 return
-            win.destroy()
+            # 不销毁窗口：_show_detail 会复用现有的详情窗口，只换内容
             self.tree_res.selection_set(str(nxt))
             self.tree_res.see(str(nxt))
             self._show_detail(None)
@@ -2458,6 +2466,11 @@ class App:
         win.bind("<Escape>", lambda e: win.destroy())
         win.bind("<Right>", lambda e: _go(1))
         win.bind("<Left>", lambda e: _go(-1))
+
+        # 翻页沿用上一次的上下文展开状态：否则每翻一条都要再点一次
+        # 「查看上下文」，看着就像「点了看不到」。
+        if getattr(self, "_ctx_open", False):
+            toggle_ctx()
 
     def show_stats(self):
         sel = self._collect_selected()
