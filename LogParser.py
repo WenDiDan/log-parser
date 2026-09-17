@@ -2423,6 +2423,14 @@ class App:
                                    ("cur",) if i == lineno else ())
             except Exception as exc:
                 ctx_txt.insert("end", "（读取失败：{}）".format(exc))
+            # 直接定位到当前行。默认停在顶部的话，命中行常常落在视口外，
+            # 还得自己往下翻 —— 那这段上下文就白展开了。
+            try:
+                cur_range = ctx_txt.tag_ranges("cur")
+                if cur_range:
+                    ctx_txt.see(cur_range[0])
+            except Exception:
+                pass
             ctx_txt.configure(state="disabled")
             ctx_holder.pack(fill="x", padx=12, pady=(0, 6), before=bar)
             btn_ctx.configure(text="收起上下文")
