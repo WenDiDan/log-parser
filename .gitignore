@@ -5,7 +5,6 @@
 # ---- Python ----
 __pycache__/
 *.py[cod]
-*$py.class
 .venv/
 venv/
 
@@ -24,7 +23,7 @@ gitee-release/**/*.exe
 *.zip
 
 # ---- 敏感信息：私人令牌绝不入库 ----
-gitee_token.txt
+# gitee_token* 一并覆盖 gitee_token.txt，不必再单列一行
 gitee_token*
 *.token
 
