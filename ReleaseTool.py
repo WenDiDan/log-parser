@@ -842,20 +842,13 @@ class ReleaseTool:
             else:
                 w.log("版本一致，且清单提示文案已包含 v{}".format(cur))
 
-            # 2) 打包产物是不是当前版本。发布脚本里也拦了同一件事，但那是
-            #    点下「发布」之后才报错；这里先看一眼，能省掉一整轮白等。
-            #    只警告不中断：「升级版本」刚跑完时 exe 必然还是旧的，
-            #    紧接着的「打包」会让它变一致。
-            exe = os.path.join(HERE, "dist", "LogParser.exe")
-            problem = exe_version_problem(exe, cur)
-            if problem:
-                w.log("[WARN] " + problem)
-                w.log("       点「打包」重新生成即可（打包后此检查会自动通过）")
-                warn = True
-            elif os.path.isfile(exe):
-                w.log("打包产物版本 OK：v" + cur)
+            # 打包产物是不是当前版本，**不在这一步查**：这一步排在打包之前，
+            # 刚升完版本时 dist 里的 exe 必然还是上一版，比出来的警告永远是
+            # 假的（显示"打包产物是 v1.1.1，清单是 v1.1.2"，而打包之后自然
+            # 就对上了）。该查的地方有两处，都已在位：_step_build 打完包立刻
+            # 验一次、不通过就中断；_step_publish 发布前再挡一次。
 
-            # 3) 源码有没有提交、标签有没有打
+            # 2) 源码有没有提交、标签有没有打
             if self._check_git(w, cur):
                 warn = True
 
@@ -1300,6 +1293,17 @@ class ReleaseTool:
         targets = self._targets()
 
         def do(w):
+            # 打包产物的版本必须和清单一致才发得出去。这道闸放在这里、而不是
+            # 放在「发布前检查」：那一步在打包之前，刚升完版本时 exe 必然还是
+            # 上一版，报出来的警告永远是假的。发布脚本自己也会拦同一件事，
+            # 但要等它真跑起来才报错；先挡一下，省掉一整轮白等。
+            exe = os.path.join(HERE, "dist", "LogParser.exe")
+            problem = exe_version_problem(exe, read_app_version())
+            if problem:
+                w.log("!! " + problem)
+                w.log("   请先点「打包」重新生成，再发布")
+                return False
+
             jobs = []          # (显示名, 命令)
             if "gitee" in targets:
                 jobs.append(("Gitee", self._py("publish_gitee.py", "--yes")))
