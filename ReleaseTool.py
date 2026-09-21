@@ -56,6 +56,9 @@ MONO = ("Consolas", 9)
 
 from build_args import BUILD_ARGS   # 与 build_inproc.py 共用同一份
 
+# 发布目标（Gitee / GitHub 的仓库地址）与 publish_*.py 读同一份配置
+import release_config
+
 STEP_NAMES = ["1 发布前检查", "2 打包", "3 发布", "4 发布后自检"]
 STEP_COLORS = {"idle": IDLE_C, "run": RUN_C, "ok": OK_C, "fail": BAD_C,
                "warn": RUN_C, "cancel": MUTED}
@@ -462,6 +465,7 @@ class ReleaseTool:
         self._build_controls()
         self._build_log()
         self._build_status()
+        self._refresh_pub_label()       # 显示当前发布目标（存在配置文件里）
 
         self.var_target.set(self.cfg.get("target", "both"))
         self.var_local.set(self.cfg.get("local_dir", ""))
@@ -575,6 +579,17 @@ class ReleaseTool:
         tk.Label(ver_row,
                  text="升版本会同步各清单；提交会把源码入库并打上对应标签",
                  bg=CARD, fg=MUTED, font=FG_S).pack(side="left", padx=(10, 0))
+
+        # 发布目标：Gitee / GitHub 的仓库地址。原先写死在 publish_*.py 的源码里，
+        # 换个仓库得改代码，现在统一存在 release_config.json 里由这里维护。
+        pub_row = tk.Frame(inner, bg=CARD)
+        pub_row.pack(fill="x", pady=(10, 0))
+        tk.Label(pub_row, text="发布目标：", bg=CARD, fg=TEXT,
+                 font=FG).pack(side="left")
+        self.lbl_pub = tk.Label(pub_row, text="", bg=CARD, fg=MUTED, font=FG_S)
+        self.lbl_pub.pack(side="left")
+        ttk.Button(pub_row, text="发布目标设置…",
+                   command=self.on_pub_target).pack(side="left", padx=(10, 0))
 
         btns = tk.Frame(inner, bg=CARD)
         btns.pack(fill="x", pady=(16, 0))
@@ -933,6 +948,129 @@ class ReleaseTool:
         self.ver = read_app_version()
         self.lbl_ver.configure(text="当前版本  v" + self.ver)
         self.lbl_bump.configure(text="v" + self.ver)
+
+    def _refresh_pub_label(self):
+        """把当前的发布目标显示出来，便于发布前扫一眼发到哪儿去了。"""
+        try:
+            cfg = release_config.load()
+            g, h = cfg["gitee"], cfg["github"]
+            self.lbl_pub.configure(text="{}/{}  ·  {}".format(
+                g["owner"], g["repo"], h["repo"]))
+        except Exception:
+            self.lbl_pub.configure(text="（读取失败）")
+
+    def on_pub_target(self):
+        """发布目标设置：Gitee / GitHub 的仓库地址。
+
+        写入项目根目录的 release_config.json（已在 .gitignore 中排除，
+        不会进版本库）。发布脚本每次被调用都是新进程，会重新读这个文件，
+        所以改完立刻生效，不需要重启本工具。
+        """
+        if self.busy:
+            return
+        cfg = release_config.load()
+        g, h = cfg["gitee"], cfg["github"]
+
+        win = tk.Toplevel(self.root)
+        win.title("发布目标设置")
+        win.configure(background=BG)
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+
+        card = tk.Frame(win, bg=CARD, highlightbackground=LINE,
+                        highlightthickness=1)
+        card.pack(fill="both", expand=True, padx=14, pady=14)
+        inner = tk.Frame(card, bg=CARD)
+        inner.pack(fill="both", expand=True, padx=16, pady=14)
+
+        vars_ = {}
+
+        def section(title, hint):
+            tk.Label(inner, text=title, bg=CARD, fg=TEXT,
+                     font=FG_B).pack(anchor="w", pady=(10, 2))
+            tk.Label(inner, text=hint, bg=CARD, fg=MUTED,
+                     font=FG_S).pack(anchor="w", pady=(0, 6))
+
+        def field(label, key, value, width=42):
+            row = tk.Frame(inner, bg=CARD)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=label, bg=CARD, fg=TEXT, font=FG,
+                     width=10, anchor="w").pack(side="left")
+            var = tk.StringVar(value=value)
+            ttk.Entry(row, textvariable=var, width=width).pack(
+                side="left", fill="x", expand=True)
+            vars_[key] = var
+
+        tk.Label(inner, text="发布目标", bg=CARD, fg=ACCENT,
+                 font=FG_B).pack(anchor="w")
+        tk.Label(inner, text="留空则沿用内置默认值（本项目的仓库）",
+                 bg=CARD, fg=MUTED, font=FG_S).pack(anchor="w", pady=(2, 0))
+
+        section("Gitee", "上传发行版附件，并更新仓库里的清单文件")
+        field("用户/组织", "g_owner", g["owner"])
+        field("仓库名", "g_repo", g["repo"])
+        field("分支", "g_branch", g["branch"])
+        field("清单路径", "g_repo_path", g["repo_path"])
+
+        section("GitHub", "通过 gh CLI 发布，格式为 用户/仓库")
+        field("仓库", "h_repo", h["repo"])
+
+        err = tk.Label(inner, text="", bg=CARD, fg=BAD_C, font=FG_S)
+        err.pack(anchor="w", pady=(8, 0))
+
+        btns = tk.Frame(inner, bg=CARD)
+        btns.pack(fill="x", pady=(14, 0))
+
+        def do_save():
+            cfg_new = {
+                "gitee": {
+                    "owner": vars_["g_owner"].get().strip(),
+                    "repo": vars_["g_repo"].get().strip(),
+                    "branch": vars_["g_branch"].get().strip(),
+                    "repo_path": vars_["g_repo_path"].get().strip(),
+                },
+                "github": {"repo": vars_["h_repo"].get().strip()},
+            }
+            # GitHub 必须是 owner/name 两段，少了 gh 会报错但不直观
+            hr = cfg_new["github"]["repo"]
+            if hr and hr.count("/") != 1:
+                err.configure(text="GitHub 仓库要写成 用户/仓库，例如 "
+                                   "WenDiDan/log-parser")
+                return
+            ok, msg = release_config.save(cfg_new)
+            if not ok:
+                err.configure(text="保存失败：" + msg)
+                return
+            self._refresh_pub_label()
+            self._append("发布目标已更新：Gitee {}/{}，GitHub {}".format(
+                vars_["g_owner"].get().strip() or "(默认)",
+                vars_["g_repo"].get().strip() or "(默认)",
+                hr or "(默认)"))
+            win.destroy()
+
+        def do_reset():
+            for key in vars_:
+                vars_[key].set("")
+            err.configure(text="已清空，点「保存」即恢复内置默认")
+
+        ttk.Button(btns, text="保存", style="Accent.TButton",
+                   command=do_save).pack(side="left")
+        ttk.Button(btns, text="恢复默认", command=do_reset).pack(
+            side="left", padx=(8, 0))
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="right")
+
+        # 当前实际生效的地址（含配置文件路径，便于排查）
+        tk.Label(inner, text="配置文件：" + release_config.CONFIG_PATH,
+                 bg=CARD, fg=MUTED, font=FG_S,
+                 wraplength=460, justify="left").pack(anchor="w", pady=(12, 0))
+
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() -
+                                       win.winfo_width()) // 2
+        y = self.root.winfo_rooty() + 90
+        win.geometry("+{}+{}".format(max(0, x), max(0, y)))
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def _step_git_commit(self, ver):
         """提交工作区改动、打上 vX.Y.Z 标签，并尝试推送。

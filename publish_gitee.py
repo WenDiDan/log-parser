@@ -26,15 +26,22 @@ import time
 import urllib.error
 import urllib.request
 
+import release_config
+
 API = "https://gitee.com/api/v5"
-OWNER = "WenDiDan"
-REPO = "log-parser"
-BRANCH = "main"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST_LOCAL = os.path.join(HERE, "gitee-release", "LogParser", "version.json")
 EXE = os.path.join(HERE, "dist", "LogParser.exe")
-REPO_PATH = "LogParser/version.json"
+
+# 仓库地址不写死在源码里：读 release_config.json（发布工具「发布目标设置…」
+# 里可改），文件不存在时回落到 release_config 的内置默认值。这样换个仓库
+# 不用改代码。
+_cfg = release_config.gitee()
+OWNER = _cfg["owner"]
+REPO = _cfg["repo"]
+BRANCH = _cfg["branch"]
+REPO_PATH = _cfg["repo_path"]
 
 
 def get_token():
@@ -131,6 +138,24 @@ def upsert_manifest(token, text, message):
 
 
 def main():
+    global OWNER, REPO, BRANCH, REPO_PATH
+    # 命令行参数优先于配置文件：临时往别处发一次，不必先改配置
+    args = sys.argv[1:]
+    over, i = {}, 0
+    keymap = {"--owner": "owner", "--repo": "repo",
+              "--branch": "branch", "--repo-path": "repo_path"}
+    while i < len(args):
+        key = keymap.get(args[i])
+        if key and i + 1 < len(args):
+            over[key] = args[i + 1]
+            i += 2
+            continue
+        i += 1
+    if over:
+        cfg = release_config.gitee(**over)
+        OWNER, REPO = cfg["owner"], cfg["repo"]
+        BRANCH, REPO_PATH = cfg["branch"], cfg["repo_path"]
+
     token = get_token()
     if not token:
         print("[ERROR] Gitee token not found.")

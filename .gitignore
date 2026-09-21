@@ -24,6 +24,9 @@ gitee_token.txt
 gitee_token*
 *.token
 
+# ---- 发布目标：每台机器可能不同（在发布工具「发布目标设置…」里改）----
+release_config.json
+
 # ---- 运行期/测试生成 ----
 _mock_logs/
 *.log

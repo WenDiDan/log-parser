@@ -22,6 +22,8 @@ import os
 import subprocess
 import sys
 
+import release_config
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
@@ -31,7 +33,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "github-release")
 MANIFEST = os.path.join(ASSETS, "version.json")
 EXE = os.path.join(ASSETS, "LogParser.exe")
-DEFAULT_REPO = "WenDiDan/log-parser"
+
+# 仓库地址不写死在源码里：读 release_config.json（发布工具「发布目标设置…」
+# 里可改），文件不存在时回落到内置默认值。--repo owner/name 仍可临时覆盖。
+DEFAULT_REPO = release_config.github()["repo"]
 
 
 def run(cmd, dry=False, quiet=False):
