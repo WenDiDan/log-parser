@@ -1264,10 +1264,14 @@ class App:
         ttk.Button(de, text="📅", width=2, style="Ghost.TButton",
                    command=lambda: CalendarPopup(self.root, self.var_de)).pack(side="left", padx=(1, 0))
 
-        # 日期格式示例。筛选框改成按内容宽度排、不再撑满整行之后，这个提示
-        # 可以放心显示，不会再被挤掉。
-        ttk.Label(filter_frame, text="格式 2026-07-20 / 2026-07-20 11:00",
-                  style="Muted.TLabel").pack(side="left", padx=(8, 0))
+        # 日期格式示例。窗口够宽时一直显示（同样的说明在点 📅 弹出的日历里
+        # 也有一份）。放不下时由 _fit_row2 收起：它是这一排里唯一可以不要的
+        # 东西，而这一排的总宽（约 1700）超过窗口默认宽度 1400 —— 不让位的
+        # 话，右边那三个操作按钮会整排溢出到窗口外，比少一行提示严重得多。
+        self._fmt_hint = ttk.Label(
+            filter_frame, text="格式 2026-07-20 / 2026-07-20 11:00",
+            style="Muted.TLabel")
+        self._fmt_hint.pack(side="left", padx=(8, 0))
 
         # 放在筛选框外侧、紧跟其后，而不是框里面：框内的条件控件请求宽度合计
         # 已经接近整行宽度，塞进去只会被压成 1 像素，顺带把「至」和格式提示
@@ -1287,6 +1291,69 @@ class App:
         ttk.Button(actions, text="📄  TXT", width=7,
                    command=lambda: self.export("txt")).pack(
             side="left", padx=(6, 0))
+
+        # 空间不足时 grid 不压缩内容，而是让右侧的列溢出到窗口外。绑到
+        # Configure 上按实际宽度决定要不要收起格式提示。
+        # row2 是 fill="x" 的，宽度只由窗口决定 —— 收起提示不会反过来改变
+        # 它，所以判定结果稳定，不会来回抖。
+        self._row2 = row2
+        self._filter_frame = filter_frame
+        self._actions_frame = actions
+        self._row2_need = None      # 首次布局后测量（那时提示一定还在）
+        self._hint_visible = True
+        self._wrapped = False
+        row2.bind("<Configure>", self._fit_row2)
+
+    def _fit_row2(self, event=None):
+        """窗口不够宽时，让这一排逐级退让。
+
+        这一排「条件 + 格式提示 + 三个按钮」共需约 1700px，而窗口默认只有
+        1400、最小 1080。grid 在空间不足时不会压缩内容，而是把右侧的列推到
+        窗口外 —— 那样按钮会整个看不见。于是分两级退：
+
+        1. 收起日期格式提示（约 366px）。它只是说明文字，日历弹窗里也有一份，
+           是这一排里唯一可以不要的东西。
+        2. 还不够就让按钮换到第二行、仍靠右。此时筛选条件已经完整可见，
+           按钮也不至于跑到窗口外。
+
+        两级的判定都只看 avail（row2 的宽度，由窗口决定，不受退让结果影响），
+        所以不会来回抖。
+        """
+        try:
+            avail = self._row2.winfo_width()
+            if avail <= 1:                  # 还没映射，量不到真实宽度
+                return
+            if self._row2_need is None:
+                # 首次布局时提示一定还在，量到的就是「全显示」所需宽度
+                self._row2_need = (self._filter_frame.winfo_reqwidth()
+                                   + self._actions_frame.winfo_reqwidth() + 8)
+            hint_have = self._fmt_hint.winfo_reqwidth() + 8
+            slim = self._row2_need - hint_have       # 收起提示后所需宽度
+
+            # 第 1 级：格式提示
+            if self._hint_visible:
+                if avail < self._row2_need:
+                    self._fmt_hint.pack_forget()
+                    self._hint_visible = False
+            elif avail >= self._row2_need + 20:      # 迟滞 20px
+                self._fmt_hint.pack(side="left", padx=(8, 0))
+                self._hint_visible = True
+
+            # 第 2 级：按钮换行。原来的 pady 是为了和框内复选框对齐
+            #（LabelFrame 标题占了上方一块高度），换行后它已在下面，不需要了。
+            if self._wrapped:
+                if avail >= slim + 20:
+                    self._actions_frame.grid_configure(
+                        row=0, column=2, columnspan=1,
+                        sticky="e", padx=(8, 0), pady=(34, 0))
+                    self._wrapped = False
+            elif avail < slim:
+                self._actions_frame.grid_configure(
+                    row=1, column=0, columnspan=3,
+                    sticky="e", padx=(0, 0), pady=(6, 0))
+                self._wrapped = True
+        except Exception:
+            pass
 
     def _build_body(self):
         # 可拖拽左右分栏
