@@ -5,7 +5,7 @@
 :: Usage:
 ::   call "%~dp0_find_python.bat"                        :: only needs stdlib
 ::   call "%~dp0_find_python.bat" tkinter                :: needs tkinter
-::   call "%~dp0_find_python.bat" "tkinter, matplotlib"  :: needs several
+::   call "%~dp0_find_python.bat" "tkinter, PyInstaller" :: needs several
 ::   if errorlevel 1  -> no usable python found
 ::   "%PY%"  your_script.py
 ::

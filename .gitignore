@@ -13,6 +13,10 @@ venv/
 build/
 dist/
 *.manifest
+# PyInstaller 每次打包都会在脚本旁边重新生成 .spec。打包参数的唯一来源是
+# build_args.py，生成出来的这份只是它的回显 —— 曾入库一份，改参数时两边
+# 各写各的、慢慢就走偏了，所以不再入库。
+LogParser.spec
 
 # ---- 发布产物：exe 体积大不入库（清单 version.json 与指南要入库）----
 github-release/*.exe
