@@ -174,6 +174,23 @@ def git_has_tag(tag):
     return rc == 0 and bool(out.strip())
 
 
+def git_unpushed():
+    """本地领先上游的提交数。没有远程或判断不了时返回 None。
+
+    「提交并打 tag」不只负责提交：工作区干净、但本地领先远端时，它该做的
+    恰恰是把这些提交推上去。没有这个数就分不清「无事可做」和「只需推送」，
+    按钮会在后一种情况下什么都不做。
+    """
+    for ref in ("@{u}", "origin/HEAD"):
+        rc, out = run_git(["rev-list", "--count", ref + "..HEAD"])
+        if rc == 0:
+            try:
+                return int(out.strip())
+            except ValueError:
+                return None
+    return None
+
+
 def _git_config(key):
     rc, out = run_git(["config", "--get", key])
     return out.strip() if rc == 0 else ""
@@ -1085,13 +1102,17 @@ class ReleaseTool:
             if not git_available() or not git_is_repo():
                 w.log("!! 当前目录不是 git 仓库，无法提交")
                 return False
+            # 身份只在真要写提交/标签时才必须 —— 单纯推送不需要它
+            pending = bool(git_changes())
+            need_tag = not git_has_tag(tag)
             name, email = git_identity()
-            if not name or not email:
+            if (pending or need_tag) and (not name or not email):
                 w.log("!! 无法确定提交身份（git 里没配置，也没有历史提交可参考）")
                 w.log('   请先执行 git config --global user.name "你的名字"')
                 w.log('   以及     git config --global user.email "你的邮箱"')
                 return False
-            w.log("提交身份: {} <{}>".format(name, email))
+            if name and email:
+                w.log("提交身份: {} <{}>".format(name, email))
 
             if not w.run_cmd(["git", "add", "-A"]):
                 return False
@@ -1101,7 +1122,12 @@ class ReleaseTool:
             if rc != 0 and "nothing to commit" not in out and "无文件要提交" not in out:
                 w.log("!! 提交失败：" + out)
                 return False
-            w.log("已提交：" + msg)
+            # 工作区干净时 commit 会以「nothing to commit」退出，这是允许的；
+            # 但不能据此报「已提交」，否则日志里会冒出一条并不存在的提交
+            if rc == 0:
+                w.log("已提交：" + msg)
+            else:
+                w.log("工作区没有改动，跳过提交")
 
             if git_has_tag(tag):
                 w.log("标签 {} 已存在，跳过".format(tag))
@@ -1147,36 +1173,53 @@ class ReleaseTool:
             messagebox.showwarning("不是 git 仓库",
                                    "当前目录不是 git 仓库：\n" + HERE)
             return
-        name, email = git_identity()
-        if not name or not email:
-            messagebox.showwarning(
-                "缺少 git 身份",
-                "git 里没有配置提交身份，也没有历史提交可以参考。\n"
-                "请先在命令行执行：\n\n"
-                '  git config --global user.name "你的名字"\n'
-                '  git config --global user.email "你的邮箱"')
-            return
         changes = git_changes()
         if changes is None:
             messagebox.showwarning("读取失败", "无法读取 git 状态。")
             return
-        if not changes:
-            extra = "" if git_has_tag("v" + ver) else "\n\n但还没有标签 v{}。".format(ver)
-            messagebox.showinfo("无需提交", "工作区是干净的，没有需要提交的改动。" + extra)
+        has_tag = git_has_tag("v" + ver)
+        ahead = git_unpushed()
+
+        # 这一步不只负责提交：工作区干净、标签也在、但本地领先远端时，该做的
+        # 恰恰是把这些提交推上去。原先只要「没有改动」就弹框返回，于是那种
+        # 情况按钮什么都不做 —— 而推送的代码就在 worker 末尾，白白够不着。
+        if not changes and has_tag and ahead == 0:
+            messagebox.showinfo(
+                "无需操作",
+                "工作区是干净的，标签 v{} 已存在，\n"
+                "本地也没有未推送的提交。".format(ver))
             return
 
-        preview = "\n".join(changes[:10])
-        if len(changes) > 10:
-            preview += "\n…（共 {} 项）".format(len(changes))
-        if not messagebox.askyesno(
-                "提交并打 tag",
-                "将提交以下 {} 项改动：\n\n{}\n\n"
-                "提交信息  chore(release): v{ver}\n"
-                "创建标签  v{ver}\n"
-                "提交身份  {name} <{email}>\n"
-                "然后尝试推送到 origin\n\n"
-                "继续？".format(len(changes), preview, ver=ver,
-                                name=name, email=email)):
+        # 身份只在真要写提交/标签时才必须：单纯推送不需要它
+        name = email = ""
+        if changes or not has_tag:
+            name, email = git_identity()
+            if not name or not email:
+                messagebox.showwarning(
+                    "缺少 git 身份",
+                    "git 里没有配置提交身份，也没有历史提交可以参考。\n"
+                    "请先在命令行执行：\n\n"
+                    '  git config --global user.name "你的名字"\n'
+                    '  git config --global user.email "你的邮箱"')
+                return
+
+        lines = []
+        if changes:
+            preview = "\n".join(changes[:10])
+            if len(changes) > 10:
+                preview += "\n…（共 {} 项）".format(len(changes))
+            lines.append("提交以下 {} 项改动：\n\n{}".format(len(changes), preview))
+            lines.append("提交信息  chore(release): v{}".format(ver))
+            lines.append("提交身份  {} <{}>".format(name, email))
+        else:
+            lines.append("工作区没有改动，跳过提交")
+        lines.append("标签 v{} {}".format(
+            ver, "已存在，跳过" if has_tag else "创建"))
+        if ahead:
+            lines.append("推送 {} 个提交到 origin".format(ahead))
+        else:
+            lines.append("尝试推送到 origin")
+        if not messagebox.askyesno("提交并打 tag", "\n".join(lines) + "\n\n继续？"):
             return
         self._start([self._step_git_commit(ver)], active={0})
 
