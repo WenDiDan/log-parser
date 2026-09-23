@@ -22,6 +22,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from datetime import datetime
 
+
 # ---- 资源路径（兼容 PyInstaller 单文件打包） ----
 def resource_path(rel):
     """打包后资源解压到 sys._MEIPASS，开发时就在脚本同目录"""
@@ -4037,6 +4038,8 @@ class App:
         append("sys", "选好模式、填好地址端口后点「连接」")
         append("sys", "服务端模式下别的机器来连时，地址填 0.0.0.0（监听所有网卡）")
         win.after(80, poll)
+
+
 
     def _export_settings(self):
         """把可移植的设置导出成一个文件，方便在其它产线机器上一键套用。
